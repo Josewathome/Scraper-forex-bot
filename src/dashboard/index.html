@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Zone Bot Dashboard</title>
+<style>
+  :root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3e;--accent:#6c63ff;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--text:#e2e8f0;--muted:#64748b;--font:'Inter',system-ui,sans-serif}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;min-height:100vh}
+  a{color:var(--accent);text-decoration:none}
+  /* Layout */
+  .header{background:var(--card);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;z-index:100}
+  .header-title{font-size:18px;font-weight:700;display:flex;align-items:center;gap:10px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .header-meta{color:var(--muted);font-size:12px;text-align:right;display:flex;align-items:center;gap:16px}
+  .tabs{background:var(--card);border-bottom:1px solid var(--border);display:flex;padding:0 24px}
+  .tab{padding:14px 18px;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);font-weight:500;transition:.2s}
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .page{display:none;padding:24px}
+  .page.active{display:block}
+  /* Cards */
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:16px;margin-bottom:24px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:18px}
+  .card-label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+  .card-value{font-size:26px;font-weight:700}
+  .card-value.green{color:var(--green)}
+  .card-value.red{color:var(--red)}
+  .card-value.yellow{color:var(--yellow)}
+  /* Tables */
+  .section{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:20px;overflow:hidden}
+  .section-header{padding:14px 18px;font-weight:600;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;padding:10px 14px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border);font-weight:500}
+  td{padding:10px 14px;border-bottom:1px solid #1e2132}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
+  .badge-green{background:rgba(34,197,94,.15);color:var(--green)}
+  .badge-red{background:rgba(239,68,68,.15);color:var(--red)}
+  .badge-yellow{background:rgba(245,158,11,.15);color:var(--yellow)}
+  .badge-blue{background:rgba(108,99,255,.15);color:var(--accent)}
+  /* Forms */
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:18px}
+  .form-group{display:flex;flex-direction:column;gap:6px}
+  label{font-size:12px;color:var(--muted);font-weight:500}
+  input,select{background:#13151f;border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:14px;width:100%;transition:.2s}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .btn{padding:8px 18px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:.2s}
+  .btn-primary{background:var(--accent);color:#fff}
+  .btn-primary:hover{filter:brightness(1.15)}
+  .btn-danger{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+  .btn-danger:hover{background:rgba(239,68,68,.25)}
+  .btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+  .btn-ghost:hover{color:var(--text);border-color:var(--text)}
+  .btn-sm{padding:4px 12px;font-size:12px}
+  .form-actions{padding:0 18px 18px;display:flex;gap:10px;align-items:center}
+  .save-msg{font-size:12px;color:var(--green);opacity:0;transition:.3s}
+  .save-msg.show{opacity:1}
+  /* Pairs */
+  .pair-list{padding:18px;display:flex;flex-wrap:wrap;gap:10px}
+  .pair-chip{display:flex;align-items:center;gap:8px;background:#13151f;border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-weight:600}
+  .pair-chip .remove{color:var(--muted);cursor:pointer;font-size:16px;line-height:1}
+  .pair-chip .remove:hover{color:var(--red)}
+  .add-pair-row{padding:0 18px 18px;display:flex;gap:10px}
+  .add-pair-row input{max-width:160px}
+  /* Logs */
+  .log-box{background:#0a0c12;border-top:1px solid var(--border);padding:14px 16px;height:480px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6}
+  .log-line.INFO{color:#94a3b8}
+  .log-line.ERROR{color:var(--red)}
+  .log-line.WARNING{color:var(--yellow)}
+  .log-line.CRITICAL{color:#f97316}
+  /* Misc */
+  .empty{color:var(--muted);text-align:center;padding:32px;font-size:13px}
+  .uptime{font-size:12px;color:var(--muted)}
+  .pnl-pos{color:var(--green)}
+  .pnl-neg{color:var(--red)}
+  .spin{display:inline-block;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .toggle{position:relative;display:inline-block;width:40px;height:22px}
+  .toggle input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:#2a2d3e;border-radius:22px;cursor:pointer;transition:.3s}
+  .slider:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.3s}
+  input:checked+.slider{background:var(--accent)}
+  input:checked+.slider:before{transform:translateX(18px)}
+  /* Login overlay */
+  #loginOverlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999}
+  .login-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:40px 36px;width:360px;max-width:92vw}
+  .login-title{font-size:22px;font-weight:700;text-align:center;margin-bottom:6px}
+  .login-sub{color:var(--muted);font-size:13px;text-align:center;margin-bottom:28px}
+  .login-error{background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:13px;display:none}
+  .login-field{margin-bottom:16px}
+  .login-field label{display:block;font-size:12px;color:var(--muted);font-weight:500;margin-bottom:6px}
+  .login-field input{width:100%;background:#13151f;border:1px solid var(--border);color:var(--text);padding:11px 14px;border-radius:8px;font-size:14px;transition:.2s}
+  .login-field input:focus{outline:none;border-color:var(--accent)}
+  .login-btn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;transition:.2s;margin-top:4px}
+  .login-btn:hover{filter:brightness(1.12)}
+  .login-btn:disabled{opacity:.6;cursor:default}
+  /* Backtest page */
+  .bt-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .bt-sel-count{font-size:12px;color:var(--muted);min-width:80px}
+  input[type=checkbox].bt-cb{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;flex-shrink:0}
+  /* 3-dot menu */
+  .dot-menu-wrap{position:relative;display:inline-block}
+  .dot-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;padding:2px 6px;border-radius:4px;transition:.15s}
+  .dot-btn:hover{color:var(--text);background:rgba(255,255,255,.06)}
+  .dot-popup{position:absolute;right:0;top:100%;margin-top:4px;background:var(--card);border:1px solid var(--border);border-radius:8px;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:500;display:none;overflow:hidden}
+  .dot-popup.open{display:block}
+  .dot-item{display:flex;align-items:center;gap:8px;padding:9px 14px;cursor:pointer;font-size:13px;color:var(--text);transition:.15s;white-space:nowrap}
+  .dot-item:hover{background:rgba(255,255,255,.05)}
+  .dot-item.danger{color:var(--red)}
+  .dot-item.danger:hover{background:rgba(239,68,68,.08)}
+  .dot-sep{border:none;border-top:1px solid var(--border);margin:3px 0}
+</style>
+</head>
+<body>
+
+<!-- ── Login overlay ──────────────────────────────────────────────── -->
+<div id="loginOverlay">
+  <div class="login-card">
+    <div class="login-title">Zone Bot</div>
+    <div class="login-sub">Enter your dashboard password to continue</div>
+    <div class="login-error" id="loginError"></div>
+    <div class="login-field">
+      <label>Password</label>
+      <input type="password" id="loginPassword" placeholder="Dashboard password"
+             onkeydown="if(event.key==='Enter')doLogin()"/>
+    </div>
+    <button class="login-btn" id="loginBtn" onclick="doLogin()">Sign In</button>
+  </div>
+</div>
+
+<!-- ── Main app ───────────────────────────────────────────────────── -->
+<div id="app" style="display:none">
+
+<div class="header">
+  <div class="header-title">
+    <div class="dot" id="statusDot"></div>
+    Zone Bot
+  </div>
+  <div class="header-meta">
+    <div style="text-align:right">
+      <div id="serverTime">Loading...</div>
+      <div id="uptime" class="uptime"></div>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="doLogout()" title="Sign out">Sign out</button>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('analytics')">Analytics</div>
+  <div class="tab" onclick="showTab('pairs')">Pairs</div>
+  <div class="tab" onclick="showTab('config')">Configuration</div>
+  <div class="tab" onclick="showTab('backtest')">Backtest</div>
+  <div class="tab" onclick="showTab('logs')">Logs</div>
+</div>
+
+<!-- ANALYTICS -->
+<div class="page active" id="page-analytics">
+
+  <!-- Account health row (always all-time) -->
+  <div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">
+    <div class="card" style="flex:1;min-width:200px">
+      <div class="card-label">Current Balance</div>
+      <div class="card-value" id="sc-balance">-</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px" id="sc-balance-change"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:200px">
+      <div class="card-label">Max Drawdown <span id="dd-period-label" style="color:var(--muted);font-weight:400">(5 months)</span></div>
+      <div class="card-value" id="sc-dd">-</div>
+    </div>
+  </div>
+
+  <!-- Period filter + period stats -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:600;color:var(--muted)">PERIOD STATS</div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="font-size:12px;color:var(--muted)">Period:</label>
+      <select id="periodSelect" onchange="onPeriodChange()"
+        style="background:#13151f;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:13px;cursor:pointer">
+        <option value="30">Last month</option>
+        <option value="90">Last 3 months</option>
+        <option value="150" selected>Last 5 months</option>
+        <option value="365">Last year</option>
+        <option value="">All time</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="cards" id="statCards">
+    <div class="card"><div class="card-label">Total Trades</div><div class="card-value" id="sc-total">-</div></div>
+    <div class="card"><div class="card-label">Wins</div><div class="card-value green" id="sc-wins">-</div></div>
+    <div class="card"><div class="card-label">Losses</div><div class="card-value red" id="sc-losses">-</div></div>
+    <div class="card"><div class="card-label">Win Rate</div><div class="card-value yellow" id="sc-wr">-</div></div>
+    <div class="card"><div class="card-label">Period PnL</div><div class="card-value" id="sc-pnl">-</div></div>
+    <div class="card"><div class="card-label">Avg PnL / Trade</div><div class="card-value" id="sc-avg">-</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">Per-Symbol Breakdown</div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total PnL</th><th>Avg PnL</th></tr></thead>
+      <tbody id="symTable"><tr><td colspan="7" class="empty">No closed trades yet.</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      Recent Trades
+      <span style="font-size:12px;color:var(--muted)" id="tradeCount"></span>
+    </div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Lots</th><th>Grade</th><th>Outcome</th><th>PnL</th><th>Opened</th></tr></thead>
+      <tbody id="tradeTable"><tr><td colspan="10" class="empty">No trades recorded yet.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- PAIRS -->
+<div class="page" id="page-pairs">
+  <div class="section">
+    <div class="section-header">Active Trading Pairs</div>
+    <div class="pair-list" id="pairList"></div>
+    <div class="add-pair-row">
+      <input id="newPairInput" placeholder="e.g. NZDUSD" maxlength="10" style="text-transform:uppercase"/>
+      <button class="btn btn-primary" onclick="addPair()">+ Add Pair</button>
+    </div>
+  </div>
+  <div style="color:var(--muted);font-size:12px;padding:0 4px">
+    Changes take effect on the next trading loop cycle (~60 seconds).
+  </div>
+</div>
+
+<!-- CONFIG -->
+<div class="page" id="page-config">
+
+  <!-- Account Balance -->
+  <div class="section">
+    <div class="section-header">Account Balance</div>
+    <div style="padding:18px 18px 0">
+      <div style="display:flex;gap:24px;margin-bottom:18px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Current Initial Balance</div>
+          <div style="font-size:24px;font-weight:700;margin-top:4px" id="bal-display">—</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px" id="bal-since">—</div>
+        </div>
+      </div>
+
+      <div style="background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:12px 14px;margin-bottom:18px">
+        <div style="font-weight:600;color:var(--yellow);margin-bottom:5px">Warning — read before updating</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.6">
+          Only change this when you <strong style="color:var(--text)">deposit or withdraw funds</strong> in your MT5 account.
+          Setting the wrong value will make your PnL%, drawdown, and year-end stats incorrect.
+          Every change is recorded with a timestamp so you have a full audit trail.
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+        <div class="form-group">
+          <label>New Balance (<span id="lbl-balance-ccy">?</span>)</label>
+          <input type="number" id="bal-new-amount" step="500" min="1" placeholder="e.g. 50000"/>
+        </div>
+        <div class="form-group">
+          <label>Note</label>
+          <input type="text" id="bal-new-note" placeholder="e.g. Deposited 20,000 KES" maxlength="80"/>
+        </div>
+      </div>
+      <button class="btn btn-danger" onclick="updateBalance()" type="button">Update Initial Balance</button>
+    </div>
+
+    <div style="border-top:1px solid var(--border);margin-top:18px">
+      <div style="padding:14px 18px 8px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">
+        Funding History
+      </div>
+      <table>
+        <thead><tr><th>Date / Time</th><th>Balance</th><th>Note</th></tr></thead>
+        <tbody id="balHistoryTable"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">Risk & Execution</div>
+    <div class="form-grid">
+      <div class="form-group"><label>Risk per Trade (%)</label><input type="number" id="cfg-risk_pct" step="0.1" min="0.1" max="5"/></div>
+      <div class="form-group"><label>Min Reward:Risk Ratio</label><input type="number" id="cfg-min_rr" step="0.1" min="1"/></div>
+      <div class="form-group"><label>Max Open Trades</label><input type="number" id="cfg-max_open_trades" step="1" min="1" max="10"/></div>
+      <div class="form-group"><label>ATR Cost Threshold</label><input type="number" id="cfg-atr_cost_threshold" step="0.01" min="0.01" max="1"/></div>
+      <div class="form-group"><label>Loop Interval (seconds)</label><input type="number" id="cfg-loop_interval" step="5" min="10"/></div>
+      <div class="form-group"><label>Breakeven RR Trigger</label><input type="number" id="cfg-breakeven_rr" step="0.1" min="0.5"/></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveConfig()">Save & Apply</button>
+      <span class="save-msg" id="saveMsg">Saved!</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">Take Profit Strategy</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Tiered TP Enabled</label>
+        <label class="toggle"><input type="checkbox" id="cfg-tiered_tp_enabled" onchange="saveConfig()"/><span class="slider"></span></label>
+      </div>
+      <div class="form-group"><label>TP1 Ratio (×SL)</label><input type="number" id="cfg-tiered_tp1_ratio" step="0.1" min="1"/></div>
+      <div class="form-group"><label>TP2 Ratio (×SL)</label><input type="number" id="cfg-tiered_tp2_ratio" step="0.1" min="1"/></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" onclick="saveConfig()">Save & Apply</button>
+      <span class="save-msg" id="saveMsgTP">Saved!</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">Reset Account Stats</div>
+    <div style="padding:18px">
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px">
+        Marks <strong style="color:var(--text)">right now</strong> as a fresh start for all performance stats —
+        win rate, drawdown, and trade history will only count trades placed <em>after</em> this reset.
+        Your actual MT5 account and open trades are <strong style="color:var(--text)">not affected</strong>.
+        Use this when you switch strategy, after a funded-account evaluation, or at the start of a new month.
+      </p>
+      <div class="form-group" style="max-width:360px;margin-bottom:14px">
+        <label>Reason (optional)</label>
+        <input type="text" id="reset-note" placeholder="e.g. New month / strategy change" maxlength="80"/>
+      </div>
+      <button class="btn btn-danger" onclick="resetAccount()" type="button">Reset Account Stats</button>
+      <span id="resetMsg" style="font-size:12px;color:var(--green);margin-left:12px;opacity:0;transition:.3s"></span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">Security</div>
+    <div style="padding:18px">
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px">
+        Rotating the JWT secret immediately invalidates all active sessions (including this one).
+        You will be redirected to sign in again.
+      </p>
+      <button class="btn btn-danger" onclick="rotateSecret()">Rotate JWT Secret</button>
+    </div>
+  </div>
+</div>
+
+<!-- BACKTEST -->
+<div class="page" id="page-backtest">
+
+  <!-- Settings + Run button -->
+  <div class="section" style="margin-bottom:20px">
+    <div class="section-header">Backtest Settings</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Simulation Initial Balance (<span id="bt-ccy">?</span>)</label>
+        <input type="number" id="cfg-backtest_balance" step="1000" min="1"
+               title="Starting balance used for every backtest simulation. Does not affect your live account."/>
+        <span style="font-size:11px;color:var(--muted);margin-top:3px">Used by weekly &amp; manual backtests only — not your live balance.</span>
+      </div>
+    </div>
+    <div class="form-actions" style="justify-content:space-between;align-items:center">
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn btn-primary" onclick="saveBtConfig()">Save Balance</button>
+        <span class="save-msg" id="saveMsgBt">Saved!</span>
+      </div>
+      <button class="btn btn-ghost" onclick="runWeeklyBacktest()" type="button"
+        title="Fetch candle data from MT5, run the backtest, generate report files and email them now">
+        ▶ Run Backtest Now
+      </button>
+    </div>
+  </div>
+
+  <!-- Reports list -->
+  <div class="section">
+    <div class="section-header">
+      <div class="bt-toolbar">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600">
+          <input type="checkbox" class="bt-cb" id="btSelectAll" onchange="toggleSelectAll(this)"/>
+          Generated Reports
+        </label>
+        <span class="bt-sel-count" id="btSelCount"></span>
+        <button class="btn btn-sm btn-ghost" id="btnDownloadSel" style="display:none"
+                onclick="downloadSelected()">↓ Download Selected</button>
+        <button class="btn btn-sm btn-danger" id="btnDeleteSel" style="display:none"
+                onclick="deleteSelected()">🗑 Delete Selected</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-sm btn-ghost" onclick="downloadAllReports()">↓ Download All</button>
+        <button class="btn btn-sm btn-ghost" onclick="loadBacktestReports()">↻ Refresh</button>
+      </div>
+    </div>
+    <table id="btReportTable">
+      <thead>
+        <tr>
+          <th style="width:34px"></th>
+          <th>Report File</th>
+          <th>Size</th>
+          <th>Generated</th>
+          <th style="text-align:right;width:60px">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="btReportBody">
+        <tr><td colspan="5" class="empty">Loading reports…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Inline report viewer -->
+  <div class="section" id="btViewerSection" style="display:none">
+    <div class="section-header">
+      <span id="btViewerTitle">Report</span>
+      <button class="btn btn-sm btn-ghost" onclick="closeBtViewer()">✕ Close</button>
+    </div>
+    <div class="log-box" id="btViewerBox" style="height:600px;white-space:pre;font-size:12px"></div>
+  </div>
+
+</div>
+
+<!-- LOGS -->
+<div class="page" id="page-logs">
+  <div class="section">
+    <div class="section-header">
+      Live Log
+      <button class="btn btn-sm btn-primary" onclick="loadLogs()">Refresh</button>
+    </div>
+    <div class="log-box" id="logBox"><div class="empty">Loading logs...</div></div>
+  </div>
+</div>
+
+</div><!-- #app -->
+
+<script>
+// ── Token storage ────────────────────────────────────────────────────
+// Access token in sessionStorage (cleared on tab close).
+// Refresh token in localStorage (persists across tabs/restarts).
+let accessToken  = sessionStorage.getItem('zb_access');
+let refreshToken = localStorage.getItem('zb_refresh');
+
+const API_BASE = window.location.pathname.startsWith('/bot') ? '/bot' : '';
+
+// ── Login / logout UI ────────────────────────────────────────────────
+function showLogin(msg) {
+  stopPolling();
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginOverlay').style.display = 'flex';
+  document.getElementById('loginPassword').value = '';
+  if (msg) {
+    const el = document.getElementById('loginError');
+    el.textContent = msg;
+    el.style.display = 'block';
+  } else {
+    document.getElementById('loginError').style.display = 'none';
+  }
+}
+
+let _refreshTimer = null;
+let _configTimer  = null;
+
+function startPolling() {
+  if (_refreshTimer) return;
+  _refreshTimer = setInterval(refresh, 30000);
+  _configTimer  = setInterval(loadConfig, 60000);
+}
+
+function stopPolling() {
+  clearInterval(_refreshTimer); _refreshTimer = null;
+  clearInterval(_configTimer);  _configTimer  = null;
+}
+
+function showApp() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  startPolling();
+}
+
+async function doLogin() {
+  const btn = document.getElementById('loginBtn');
+  const pw  = document.getElementById('loginPassword').value;
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  try {
+    const r = await fetch(API_BASE + '/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) {
+      showLogin(d.error || 'Invalid password');
+      return;
+    }
+    accessToken  = d.access_token;
+    refreshToken = d.refresh_token;
+    sessionStorage.setItem('zb_access',  accessToken);
+    localStorage.setItem('zb_refresh',   refreshToken);
+    showApp();
+    loadConfig();
+    refresh();
+  } catch(e) {
+    showLogin('Could not reach server. Is the bot running?');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+  }
+}
+
+async function doLogout() {
+  try {
+    if (refreshToken) {
+      await fetch(API_BASE + '/api/auth/logout', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({refresh_token: refreshToken}),
+      });
+    }
+  } catch(e) {}
+  accessToken  = null;
+  refreshToken = null;
+  sessionStorage.removeItem('zb_access');
+  localStorage.removeItem('zb_refresh');
+  showLogin();
+}
+
+// ── Authenticated fetch wrapper ───────────────────────────────────────
+// Transparently refreshes the access token on 401, then retries once.
+async function apiFetch(path, opts = {}) {
+  const url = API_BASE + path;
+  opts.headers = {...(opts.headers || {}), 'Authorization': `Bearer ${accessToken}`};
+  let r = await fetch(url, opts);
+
+  if (r.status === 401 && refreshToken) {
+    const refreshed = await tryRefresh();
+    if (!refreshed) { showLogin('Session expired. Please sign in again.'); throw new Error('unauthenticated'); }
+    opts.headers['Authorization'] = `Bearer ${accessToken}`;
+    r = await fetch(url, opts);
+  }
+
+  if (r.status === 401) { showLogin('Session expired. Please sign in again.'); throw new Error('unauthenticated'); }
+  return r;
+}
+
+async function tryRefresh() {
+  if (!refreshToken) return false;
+  try {
+    const r = await fetch(API_BASE + '/api/auth/refresh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({refresh_token: refreshToken}),
+    });
+    if (!r.ok) {
+      refreshToken = null;
+      localStorage.removeItem('zb_refresh');
+      return false;
+    }
+    const d = await r.json();
+    accessToken = d.access_token;
+    sessionStorage.setItem('zb_access', accessToken);
+    if (d.refresh_token) {
+      refreshToken = d.refresh_token;
+      localStorage.setItem('zb_refresh', refreshToken);
+    }
+    return true;
+  } catch(e) { return false; }
+}
+
+// ── Tab navigation ───────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i)=>{
+    const names = ['analytics','pairs','config','backtest','logs'];
+    t.classList.toggle('active', names[i]===name);
+  });
+  document.querySelectorAll('.page').forEach(p=>{
+    p.classList.toggle('active', p.id===`page-${name}`);
+  });
+  if(name==='logs')      loadLogs();
+  if(name==='config')    loadBalanceHistory();
+  if(name==='backtest')  { loadBacktestReports(); loadBtConfig(); }
+}
+
+// ── Status ───────────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const r = await apiFetch('/api/status');
+    const d = await r.json();
+    document.getElementById('serverTime').textContent = new Date(d.server_time).toLocaleTimeString();
+    const u = d.uptime_seconds;
+    const h = Math.floor(u/3600), m = Math.floor((u%3600)/60);
+    document.getElementById('uptime').textContent = `Uptime: ${h}h ${m}m`;
+    document.getElementById('statusDot').style.background = d.running ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    if (e.message !== 'unauthenticated') {
+      document.getElementById('serverTime').textContent = 'Offline';
+      document.getElementById('statusDot').style.background = 'var(--red)';
+      document.getElementById('statusDot').style.boxShadow = '0 0 6px var(--red)';
+    }
+  }
+}
+
+// ── Analytics ────────────────────────────────────────────────────────
+let periodDays = 150; // default: last 5 months
+
+function onPeriodChange() {
+  const val = document.getElementById('periodSelect').value;
+  periodDays = val ? parseInt(val) : null;
+  const labels = {'30':'1 month','90':'3 months','150':'5 months','365':'1 year','':'all time'};
+  document.getElementById('dd-period-label').textContent = '(' + (labels[val] || val+' days') + ')';
+  loadStats();
+}
+
+function pnlClass(v){ return v>0?'pnl-pos':v<0?'pnl-neg':''; }
+function fmt(v){ return v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function outcomeBadge(o){
+  const m = {WIN_FULL:'badge-green',WIN_PARTIAL:'badge-green',LOSS:'badge-red',OPEN:'badge-blue',MONITOR_CLOSE:'badge-yellow'};
+  return `<span class="badge ${m[o]||'badge-blue'}">${o}</span>`;
+}
+
+async function loadStats() {
+  try {
+    const url = '/api/stats' + (periodDays ? `?days=${periodDays}` : '');
+    const r = await apiFetch(url);
+    const d = await r.json();
+    const g = d.global;
+    const ccy = g.currency || '';
+
+    // ── Current balance card (always all-time) ──
+    const balEl = document.getElementById('sc-balance');
+    if (g.current_balance != null) {
+      balEl.textContent = fmt(g.current_balance) + (ccy ? ' ' + ccy : '');
+      balEl.className   = 'card-value ' + (g.balance_change_pct >= 0 ? 'green' : 'red');
+      const chg  = document.getElementById('sc-balance-change');
+      const sign = g.balance_change_pct >= 0 ? '+' : '';
+      const since = g.balance_set_at ? ' · since ' + new Date(g.balance_set_at).toLocaleDateString() : '';
+      chg.textContent = `${sign}${g.balance_change_pct.toFixed(2)}% vs ${fmt(g.initial_balance)}${since}`;
+      chg.style.color = g.balance_change_pct >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+
+    // ── Max drawdown card ──
+    const ddEl = document.getElementById('sc-dd');
+    if (g.drawdown_pct != null) {
+      ddEl.textContent = g.drawdown_pct.toFixed(2) + '%';
+      ddEl.className   = 'card-value ' + (g.drawdown_pct > 15 ? 'red' : g.drawdown_pct > 7 ? 'yellow' : 'green');
+    }
+
+    // ── Period stats cards ──
+    document.getElementById('sc-total').textContent  = g.total;
+    document.getElementById('sc-wins').textContent   = g.wins;
+    document.getElementById('sc-losses').textContent = g.losses;
+    document.getElementById('sc-wr').textContent     = g.total ? `${g.win_rate}%` : '-';
+
+    const pnlEl = document.getElementById('sc-pnl');
+    pnlEl.textContent = g.total ? (g.total_pnl>=0?'+':'')+fmt(g.total_pnl)+(ccy?' '+ccy:'') : '-';
+    pnlEl.className   = 'card-value '+pnlClass(g.total_pnl);
+
+    const avgEl = document.getElementById('sc-avg');
+    avgEl.textContent = g.total ? (g.avg_pnl>=0?'+':'')+fmt(g.avg_pnl) : '-';
+    avgEl.className   = 'card-value '+pnlClass(g.avg_pnl);
+
+    // ── Per-symbol table ──
+    const tbody = document.getElementById('symTable');
+    const syms  = Object.entries(d.by_symbol);
+    if(!syms.length){ tbody.innerHTML='<tr><td colspan="7" class="empty">No closed trades yet.</td></tr>'; return; }
+    tbody.innerHTML = syms.sort((a,b)=>b[1].total-a[1].total).map(([sym,s])=>`
+      <tr>
+        <td><strong>${sym}</strong></td>
+        <td>${s.total}</td>
+        <td class="pnl-pos">${s.wins}</td>
+        <td class="pnl-neg">${s.losses}</td>
+        <td>${s.win_rate}%</td>
+        <td class="${pnlClass(s.total_pnl)}">${s.total_pnl>=0?'+':''}${fmt(s.total_pnl)}</td>
+        <td class="${pnlClass(s.avg_pnl)}">${s.avg_pnl>=0?'+':''}${fmt(s.avg_pnl)}</td>
+      </tr>`).join('');
+  } catch(e) { if(e.message!=='unauthenticated') console.error('stats error', e); }
+}
+
+async function loadTrades() {
+  try {
+    const r = await apiFetch('/api/trades?n=50');
+    const d = await r.json();
+    const trades = d.trades || [];
+    document.getElementById('tradeCount').textContent = `${trades.length} shown`;
+    const tbody = document.getElementById('tradeTable');
+    if(!trades.length){ tbody.innerHTML='<tr><td colspan="10" class="empty">No trades recorded yet.</td></tr>'; return; }
+    tbody.innerHTML = [...trades].reverse().map(t=>{
+      const pnl = t.pnl!=null ? `<span class="${pnlClass(t.pnl)}">${t.pnl>=0?'+':''}${t.pnl}</span>` : '-';
+      const opened = t.opened_at ? new Date(t.opened_at).toLocaleString() : '-';
+      return `<tr>
+        <td><strong>${t.symbol}</strong></td>
+        <td>${t.direction}</td>
+        <td>${(+t.entry).toFixed(5)}</td>
+        <td>${(+t.sl).toFixed(5)}</td>
+        <td>${(+t.tp).toFixed(5)}</td>
+        <td>${t.lot_size}</td>
+        <td><span class="badge badge-blue">${t.grade||'?'}</span></td>
+        <td>${outcomeBadge(t.outcome)}</td>
+        <td>${pnl}</td>
+        <td>${opened}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { if(e.message!=='unauthenticated') console.error('trades error', e); }
+}
+
+// ── Pairs ─────────────────────────────────────────────────────────────
+async function loadPairs() {
+  try {
+    const r = await apiFetch('/api/symbols');
+    const d = await r.json();
+    const list = document.getElementById('pairList');
+    if(!d.symbols||!d.symbols.length){ list.innerHTML='<span style="color:var(--muted)">No symbols configured.</span>'; return; }
+    list.innerHTML = d.symbols.map(s=>`
+      <div class="pair-chip">
+        <strong>${s}</strong>
+        <span class="remove" onclick="removePair('${s}')" title="Remove">&times;</span>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+async function addPair() {
+  const inp = document.getElementById('newPairInput');
+  const sym = inp.value.trim().toUpperCase();
+  if(!sym){ alert('Enter a symbol first.'); return; }
+  const r = await apiFetch('/api/symbols',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})});
+  const d = await r.json();
+  if(d.ok){ inp.value=''; loadPairs(); }
+  else alert(d.error||'Error');
+}
+
+async function removePair(sym) {
+  if(!confirm(`Remove ${sym} from trading?`)) return;
+  const r = await apiFetch(`/api/symbols/${sym}`,{method:'DELETE'});
+  const d = await r.json();
+  if(d.ok) loadPairs();
+  else alert(d.error||'Error');
+}
+
+// ── Config ────────────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const r = await apiFetch('/api/config');
+    const d = await r.json();
+    const map = {
+      risk_pct:'cfg-risk_pct', min_rr:'cfg-min_rr', max_open_trades:'cfg-max_open_trades',
+      atr_cost_threshold:'cfg-atr_cost_threshold', loop_interval:'cfg-loop_interval',
+      tiered_tp1_ratio:'cfg-tiered_tp1_ratio', tiered_tp2_ratio:'cfg-tiered_tp2_ratio',
+      breakeven_rr:'cfg-breakeven_rr', backtest_balance:'cfg-backtest_balance',
+    };
+    for(const[k,id] of Object.entries(map)){
+      const el = document.getElementById(id);
+      if(el) el.value = d[k]??'';
+    }
+    const tp = document.getElementById('cfg-tiered_tp_enabled');
+    if(tp) tp.checked = !!d.tiered_tp_enabled;
+    const ccyEl = document.getElementById('lbl-balance-ccy');
+    if(ccyEl && d.account_currency) ccyEl.textContent = d.account_currency;
+    const btCcy = document.getElementById('bt-ccy');
+    if(btCcy && d.account_currency) btCcy.textContent = d.account_currency;
+  } catch(e) { if(e.message!=='unauthenticated') console.error('config load error', e); }
+}
+
+async function saveConfig() {
+  const fields = {
+    risk_pct:            parseFloat(document.getElementById('cfg-risk_pct')?.value),
+    min_rr:              parseFloat(document.getElementById('cfg-min_rr')?.value),
+    max_open_trades:     parseInt(document.getElementById('cfg-max_open_trades')?.value),
+    atr_cost_threshold:  parseFloat(document.getElementById('cfg-atr_cost_threshold')?.value),
+    loop_interval:       parseInt(document.getElementById('cfg-loop_interval')?.value),
+    tiered_tp_enabled:   document.getElementById('cfg-tiered_tp_enabled')?.checked,
+    tiered_tp1_ratio:    parseFloat(document.getElementById('cfg-tiered_tp1_ratio')?.value),
+    tiered_tp2_ratio:    parseFloat(document.getElementById('cfg-tiered_tp2_ratio')?.value),
+    breakeven_rr:        parseFloat(document.getElementById('cfg-breakeven_rr')?.value),
+    backtest_balance:    parseFloat(document.getElementById('cfg-backtest_balance')?.value),
+  };
+  try {
+    const r = await apiFetch('/api/config',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)});
+    const d = await r.json();
+    if(d.ok){
+      ['saveMsg','saveMsgTP'].forEach(id=>{
+        const el = document.getElementById(id);
+        if(el){ el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),2000); }
+      });
+    }
+  } catch(e) { if(e.message!=='unauthenticated') alert('Error saving config: '+e); }
+}
+
+async function rotateSecret() {
+  const pw = prompt('Confirm your dashboard password to rotate the JWT secret:');
+  if (pw === null) return;
+  try {
+    const r = await fetch(API_BASE + '/api/auth/rotate-secret', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password: pw}),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || 'Failed'); return; }
+    alert('JWT secret rotated. You will be signed out now.');
+    accessToken  = null;
+    refreshToken = null;
+    sessionStorage.removeItem('zb_access');
+    localStorage.removeItem('zb_refresh');
+    showLogin();
+  } catch(e) { alert('Error: ' + e); }
+}
+
+// ── Weekly backtest manual trigger ────────────────────────────────────
+async function runWeeklyBacktest() {
+  const ok = confirm(
+    'Run the weekly backtest now?\n\n' +
+    'This will:\n' +
+    '  • Fetch the last 2 months of candle data from MT5\n' +
+    '  • Generate the report + diagnostics files\n' +
+    '  • Send both files to your email\n\n' +
+    'It runs in the background and takes a few minutes.\n' +
+    'Watch the Logs tab for progress.'
+  );
+  if (!ok) return;
+
+  try {
+    const r = await apiFetch('/api/run-weekly-backtest', {method: 'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      alert('Backtest started!\n\n' + d.message);
+    } else {
+      alert('Error: ' + (d.error || 'Unknown error'));
+    }
+  } catch(e) {
+    if (e.message !== 'unauthenticated') alert('Error: ' + e);
+  }
+}
+
+// ── Balance history ───────────────────────────────────────────────────
+async function loadBalanceHistory() {
+  try {
+    const r = await apiFetch('/api/balance-history');
+    const d = await r.json();
+    const history = d.history || [];
+
+    if (history.length) {
+      const latest = history[history.length - 1];
+      const ccy    = latest.currency || '';
+      document.getElementById('bal-display').textContent =
+        fmt(latest.balance) + (ccy ? ' ' + ccy : '');
+      document.getElementById('bal-since').textContent =
+        'Set on ' + new Date(latest.set_at).toLocaleString();
+    }
+
+    const tbody = document.getElementById('balHistoryTable');
+    if (!history.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">No history yet.</td></tr>';
+      return;
+    }
+    // Show newest first
+    tbody.innerHTML = [...history].reverse().map((e, i, arr) => {
+      const isLatest = i === 0;
+      const prev     = arr[i + 1];
+      let delta = '';
+      if (prev) {
+        const diff = e.balance - prev.balance;
+        const sign = diff >= 0 ? '+' : '';
+        delta = `<span style="font-size:11px;color:${diff>=0?'var(--green)':'var(--red)'}">${sign}${fmt(diff)}</span>`;
+      }
+      const isReset = e.type === 'reset';
+      return `<tr${isLatest ? ' style="background:rgba(108,99,255,.06)"' : ''}>
+        <td>${new Date(e.set_at).toLocaleString()}${isLatest ? ' <span class="badge badge-blue" style="font-size:10px">current</span>' : ''}${isReset ? ' <span class="badge badge-yellow" style="font-size:10px">RESET</span>' : ''}</td>
+        <td><strong>${fmt(e.balance)} ${e.currency||''}</strong> ${delta}</td>
+        <td>${escHtml(e.note || '')}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { if(e.message !== 'unauthenticated') console.error('balance history error', e); }
+}
+
+async function updateBalance() {
+  const amountEl = document.getElementById('bal-new-amount');
+  const noteEl   = document.getElementById('bal-new-note');
+  const amount   = parseFloat(amountEl.value);
+  const note     = noteEl.value.trim();
+
+  if (!amount || amount <= 0) { alert('Enter a valid balance amount.'); return; }
+
+  const ccy = document.getElementById('bal-display').textContent.split(' ').slice(-1)[0] || '';
+  const confirmed = confirm(
+    `Update initial balance to ${fmt(amount)} ${ccy}?\n\n` +
+    `This affects all PnL %, drawdown, and year-end statistics.\n` +
+    `Only confirm if you have deposited or withdrawn funds from your MT5 account.`
+  );
+  if (!confirmed) return;
+
+  try {
+    const r = await apiFetch('/api/balance-history', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({balance: amount, note: note || `Balance set to ${fmt(amount)}`}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      amountEl.value = '';
+      noteEl.value   = '';
+      loadBalanceHistory();
+      loadStats();   // refresh analytics cards with new initial balance
+    } else {
+      alert(d.error || 'Error updating balance.');
+    }
+  } catch(e) { alert('Error: ' + e); }
+}
+
+// ── Reset account stats ───────────────────────────────────────────────
+async function resetAccount() {
+  const note = document.getElementById('reset-note').value.trim();
+  const confirmed = confirm(
+    'Reset all performance stats to start fresh from now?\n\n' +
+    'Your MT5 account and open trades are NOT affected.\n' +
+    'Win rate, drawdown, and trade history will only count trades after this point.'
+  );
+  if (!confirmed) return;
+  try {
+    const r = await apiFetch('/api/reset-balance', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({note: note || 'Manual stats reset'}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('reset-note').value = '';
+      const msg = document.getElementById('resetMsg');
+      msg.textContent = 'Stats reset — tracking from now.';
+      msg.style.opacity = '1';
+      setTimeout(() => { msg.style.opacity = '0'; }, 3500);
+      loadBalanceHistory();
+      loadStats();
+    } else {
+      alert(d.error || 'Error resetting account stats.');
+    }
+  } catch(e) { if (e.message !== 'unauthenticated') alert('Error: ' + e); }
+}
+
+// ── Backtest ──────────────────────────────────────────────────────────
+
+async function loadBtConfig() {
+  try {
+    const r = await apiFetch('/api/config');
+    const d = await r.json();
+    const el = document.getElementById('cfg-backtest_balance');
+    if(el) el.value = d.backtest_balance ?? '';
+    const btCcy = document.getElementById('bt-ccy');
+    if(btCcy && d.account_currency) btCcy.textContent = d.account_currency;
+  } catch(e) {}
+}
+
+async function saveBtConfig() {
+  const val = parseFloat(document.getElementById('cfg-backtest_balance')?.value);
+  if(!val || val <= 0) { alert('Enter a valid balance amount.'); return; }
+  try {
+    const r = await apiFetch('/api/config', {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({backtest_balance: val}),
+    });
+    const d = await r.json();
+    if(d.ok) {
+      const msg = document.getElementById('saveMsgBt');
+      msg.classList.add('show');
+      setTimeout(() => msg.classList.remove('show'), 2000);
+    }
+  } catch(e) { if(e.message !== 'unauthenticated') alert('Error saving: ' + e); }
+}
+
+async function loadBacktestReports() {
+  const tbody = document.getElementById('btReportBody');
+  tbody.innerHTML = '<tr><td colspan="5" class="empty">Loading…</td></tr>';
+  // reset select-all
+  const sa = document.getElementById('btSelectAll');
+  if (sa) sa.checked = false;
+  updateSelCount();
+  try {
+    const r = await apiFetch('/api/backtest-reports');
+    const d = await r.json();
+    const reports = d.reports || [];
+    if (!reports.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No reports yet. Run a backtest first.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = reports.map(rep => {
+      const kb   = (rep.size / 1024).toFixed(1);
+      const date = new Date(rep.modified).toLocaleString();
+      const name = escHtml(rep.name);
+      const safeName = name.replace(/'/g, "\\'");
+      return `<tr>
+        <td style="width:34px;text-align:center">
+          <input type="checkbox" class="bt-cb bt-row-cb" value="${name}"
+                 onchange="updateSelCount()"/>
+        </td>
+        <td><strong>${name}</strong></td>
+        <td style="color:var(--muted)">${kb} KB</td>
+        <td style="color:var(--muted)">${date}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <div class="dot-menu-wrap">
+            <button class="dot-btn" onclick="toggleDotMenu(this)" title="Actions">⋯</button>
+            <div class="dot-popup">
+              <div class="dot-item" onclick="viewBtReport('${safeName}');closeDotMenus()">
+                👁 View
+              </div>
+              <div class="dot-item" onclick="downloadBtReport('${safeName}');closeDotMenus()">
+                ↓ Download
+              </div>
+              <div class="dot-item" onclick="downloadAllReports();closeDotMenus()">
+                ↓ Download All
+              </div>
+              <hr class="dot-sep"/>
+              <div class="dot-item danger" onclick="deleteReport('${safeName}');closeDotMenus()">
+                🗑 Delete
+              </div>
+            </div>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    if(e.message !== 'unauthenticated')
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">Failed to load reports.</td></tr>';
+  }
+}
+
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.bt-row-cb').forEach(c => c.checked = cb.checked);
+  updateSelCount();
+}
+
+function updateSelCount() {
+  const all = document.querySelectorAll('.bt-row-cb');
+  const sel = document.querySelectorAll('.bt-row-cb:checked');
+  const cnt = document.getElementById('btSelCount');
+  const btnDl  = document.getElementById('btnDownloadSel');
+  const btnDel = document.getElementById('btnDeleteSel');
+  if (cnt)    cnt.textContent = sel.length ? `${sel.length} selected` : '';
+  if (btnDl)  btnDl.style.display  = sel.length ? 'inline-flex' : 'none';
+  if (btnDel) btnDel.style.display = sel.length ? 'inline-flex' : 'none';
+  // sync select-all checkbox state
+  const sa = document.getElementById('btSelectAll');
+  if (sa) {
+    sa.checked = all.length > 0 && sel.length === all.length;
+    sa.indeterminate = sel.length > 0 && sel.length < all.length;
+  }
+}
+
+function toggleDotMenu(btn) {
+  const popup = btn.nextElementSibling;
+  const isOpen = popup.classList.contains('open');
+  closeDotMenus();
+  if (!isOpen) popup.classList.add('open');
+}
+
+function closeDotMenus() {
+  document.querySelectorAll('.dot-popup.open').forEach(p => p.classList.remove('open'));
+}
+
+// Close dot menus on outside click
+document.addEventListener('click', e => {
+  if (!e.target.closest('.dot-menu-wrap')) closeDotMenus();
+});
+
+async function downloadSelected() {
+  const selected = [...document.querySelectorAll('.bt-row-cb:checked')].map(c => c.value);
+  if (!selected.length) return;
+  for (const name of selected) {
+    await downloadBtReport(name);
+  }
+}
+
+async function downloadAllReports() {
+  try {
+    const r = await apiFetch('/api/backtest-reports');
+    const d = await r.json();
+    const reports = d.reports || [];
+    if (!reports.length) { alert('No reports to download.'); return; }
+    for (const rep of reports) {
+      await downloadBtReport(rep.name);
+    }
+  } catch(e) {
+    if (e.message !== 'unauthenticated') alert('Error: ' + e);
+  }
+}
+
+async function deleteReport(filename) {
+  if (!confirm(`Delete report "${filename}"?\n\nThis cannot be undone.`)) return;
+  try {
+    const r = await apiFetch('/api/backtest-reports/' + encodeURIComponent(filename), {method: 'DELETE'});
+    const d = await r.json();
+    if (d.ok) {
+      loadBacktestReports();
+      // If viewer was showing this file, close it
+      if (document.getElementById('btViewerTitle')?.textContent === filename) closeBtViewer();
+    } else {
+      alert(d.error || 'Delete failed.');
+    }
+  } catch(e) {
+    if (e.message !== 'unauthenticated') alert('Delete failed: ' + e);
+  }
+}
+
+async function deleteSelected() {
+  const selected = [...document.querySelectorAll('.bt-row-cb:checked')].map(c => c.value);
+  if (!selected.length) return;
+  if (!confirm(`Delete ${selected.length} report(s)?\n\nThis cannot be undone.`)) return;
+  try {
+    for (const name of selected) {
+      await apiFetch('/api/backtest-reports/' + encodeURIComponent(name), {method: 'DELETE'});
+    }
+    loadBacktestReports();
+    closeBtViewer();
+  } catch(e) {
+    if (e.message !== 'unauthenticated') alert('Delete failed: ' + e);
+  }
+}
+
+async function viewBtReport(filename) {
+  const section = document.getElementById('btViewerSection');
+  const box     = document.getElementById('btViewerBox');
+  const title   = document.getElementById('btViewerTitle');
+  section.style.display = 'block';
+  title.textContent = filename;
+  box.textContent = 'Loading…';
+  box.scrollTop = 0;
+  section.scrollIntoView({behavior:'smooth', block:'start'});
+  try {
+    const r = await apiFetch('/api/backtest-reports/' + encodeURIComponent(filename));
+    if (!r.ok) { box.textContent = 'Error: report not found.'; return; }
+    box.textContent = await r.text();
+  } catch(e) {
+    if(e.message !== 'unauthenticated') box.textContent = 'Failed to load report.';
+  }
+}
+
+async function downloadBtReport(filename) {
+  try {
+    const r = await apiFetch('/api/backtest-reports/' + encodeURIComponent(filename));
+    if (!r.ok) { alert('Report not found.'); return; }
+    const text = await r.text();
+    const blob = new Blob([text], {type: 'text/plain'});
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    if(e.message !== 'unauthenticated') alert('Download failed: ' + e);
+  }
+}
+
+function closeBtViewer() {
+  document.getElementById('btViewerSection').style.display = 'none';
+  document.getElementById('btViewerBox').textContent = '';
+}
+
+// ── Logs ──────────────────────────────────────────────────────────────
+async function loadLogs() {
+  try {
+    const r = await apiFetch('/api/logs?n=200');
+    const d = await r.json();
+    const box = document.getElementById('logBox');
+    if(!d.lines||!d.lines.length){ box.innerHTML='<div class="empty">No log entries yet.</div>'; return; }
+    box.innerHTML = d.lines.map(line=>{
+      let cls = 'INFO';
+      if(line.includes('[ERROR]'))       cls='ERROR';
+      else if(line.includes('[WARNING]')) cls='WARNING';
+      else if(line.includes('[CRITICAL]'))cls='CRITICAL';
+      return `<div class="log-line ${cls}">${escHtml(line)}</div>`;
+    }).join('');
+    box.scrollTop = box.scrollHeight;
+  } catch(e) { if(e.message!=='unauthenticated') document.getElementById('logBox').innerHTML='<div class="empty">Could not load logs.</div>'; }
+}
+
+function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Init ──────────────────────────────────────────────────────────────
+function refresh() {
+  loadStatus();
+  loadStats();
+  loadTrades();
+  loadPairs();
+}
+
+// If we already have tokens, show the app immediately; otherwise show login.
+if (accessToken) {
+  showApp();
+  loadConfig();
+  loadBalanceHistory();
+  refresh();
+} else if (refreshToken) {
+  // Try silent refresh before showing login
+  tryRefresh().then(ok => {
+    if (ok) { showApp(); loadConfig(); loadBalanceHistory(); refresh(); }
+    else showLogin();
+  });
+} else {
+  showLogin();
+}
+
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# ── NEVER COMMIT THESE ────────────────────────
+.env
+
+
+# ── Generated at runtime ──────────────────────
+ready_to_trade
+.cache/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+backtest_*.csv
+backtest_*.txt
+/src/backtest_results
+# ── IDE ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.zip
+*/venv/
+/venv
+/history_backtest_reults    
+
+.checkpoints
+/zones
+/text
+/logs
+.claude
+/.claude

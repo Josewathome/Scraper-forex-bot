@@ -1,0 +1,62 @@
+# Before first run: copy .env.example to .env and fill in your real credentials.
+# Docker Compose reads .env automatically for ${VAR} substitution below.
+# Dashboard: http://localhost:8000   |   MT5 VNC: http://localhost:3000
+
+services:
+  mt5:
+    image: gmag11/metatrader5_vnc:latest
+    container_name: scalper-prime
+    restart: unless-stopped
+    stop_grace_period: 30s   # Give SIGTERM 30s to trigger the bot's clean shutdown
+                              # handler and flush a final checkpoint before SIGKILL.
+                              # Default Docker timeout is 10s — too short for MT5 + Wine.
+    ports:
+      - "3000:3000"       # noVNC browser UI → http://localhost:3000
+      - "8000:8080"       # Trading dashboard → http://localhost:8000
+    env_file:
+      - .env              # hard-fail if .env is missing (prevents silent empty-credential start)
+    environment:
+      # VNC login — these don't contain special chars so interpolation is safe
+      - CUSTOM_USER=${VNC_USER}
+      - PASSWORD=${VNC_PASSWORD}
+      # KasmVNC performance settings — no credentials, interpolation safe
+      - DRINODE=/dev/dri/renderD128
+      - DISPLAY_SIZEW=1280
+      - DISPLAY_SIZEH=900
+      - DISPLAY_REFRESH=60
+      - KASMVNC_RECT_THREADS=4
+      
+      # MT5_PASSWORD, TRADING_ID, MT5_SERVER, NEWS_API_KEY, DASHBOARD_PASSWORD,
+      # JWT_* and all other bot credentials are passed via env_file: .env above.
+      # They must NOT be re-declared here — Docker Compose interpolates $VAR
+      # inside environment: values, which corrupts passwords containing $ or &.
+    shm_size: "256m"     # Wine + KasmVNC needs > 64 MB default; 256 MB prevents crashes
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    networks:
+      - default
+      - forex-shared
+    volumes:
+      - mt5_config:/config
+      - ./fix_rpyc.sh:/custom-cont-init.d/fix_rpyc.sh   # no-op, kept to avoid init error
+      - ./override_start.sh:/Metatrader/start.sh
+      - .:/bot                                            # code + persistent data on host
+      - news_cache:/bot/.cache                            # news API cache — in-container, wiped Friday
+      - zones_data:/bot/zones                             # zone snapshots — in-container, wiped Friday
+
+volumes:
+  mt5_config:
+  news_cache:   # news API TTL cache — wiped every Friday at market close
+  zones_data:   # zone snapshots — wiped every Friday at market close, remapped Monday open
+
+networks:
+  default: {}
+  forex-shared:
+    # external: true tells Docker Compose to attach to the pre-existing network
+    # named exactly "forex-shared" instead of creating a new prefixed one
+    # (e.g. "new-forex-bot_forex-shared").  The forex-api project creates this
+    # network first; this bot simply joins it on every restart.
+    # If forex-api is not running yet, create the network manually once:
+    #   docker network create forex-shared
+    external: true
