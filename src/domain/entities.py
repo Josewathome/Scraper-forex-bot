@@ -100,6 +100,8 @@ class Trade:
     status:      TradeStatus = TradeStatus.PENDING
     created_at:  datetime    = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     mt5_ticket:  Optional[int] = None
+    commission:   float = 0.0    # per-lot per-side commission paid (USD)
+    spread_cost:  float = 0.0    # spread cost at entry (USD)
 
 
 # ── Signal ────────────────────────────────────────────────────────────────────

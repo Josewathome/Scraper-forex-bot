@@ -3,7 +3,7 @@
 # Dashboard: http://localhost:8000   |   MT5 VNC: http://localhost:3000
 
 services:
-  mt5:
+  scalper-prime:
     image: gmag11/metatrader5_vnc:latest
     container_name: scalper-prime
     restart: unless-stopped
@@ -47,8 +47,14 @@ services:
 
 volumes:
   mt5_config:
-  news_cache:   # news API TTL cache — wiped every Friday at market close
-  zones_data:   # zone snapshots — wiped every Friday at market close, remapped Monday open
+    external: true          # pre-existing volume that has MT5 already installed
+    name: forex_bot_mt5_config
+  news_cache:               # news API TTL cache — wiped every Friday at market close
+    external: true
+    name: forex_bot_news_cache
+  zones_data:               # zone snapshots — wiped every Friday at market close, remapped Monday open
+    external: true
+    name: forex_bot_zones_data
 
 networks:
   default: {}
