@@ -776,10 +776,19 @@ fi
 # MT5 exits after its "scanning network for access points" self-restart
 # cycle and sometimes doesn't come back. This loop detects that and
 # relaunches it so ticks keep flowing to the ZMQ feed.
+#
+# WHY pgrep instead of `wine tasklist`:
+# `wine tasklist` connects to the wineserver via its Unix socket. When run
+# from a `docker exec` shell (different session than override_start.sh), it
+# creates a separate wineserver context and sees NO processes — even when
+# terminal64.exe is clearly alive in `ps aux`. This causes permanent false
+# negatives and the watchdog endlessly hammers MT5's single-instance lock.
+# `pgrep -f terminal64.exe` checks the Linux process table directly and is
+# always reliable regardless of wineserver socket state.
 (
     while true; do
         sleep 20
-        if ! WINEPREFIX=/config/.wine wine tasklist 2>/dev/null | grep -qi "terminal64"; then
+        if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
             show_message "[watchdog] MT5 not running — restarting..."
             _patch_terminal_ini
             DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
