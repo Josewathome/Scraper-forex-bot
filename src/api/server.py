@@ -758,6 +758,79 @@ class DashboardServer:
                 "message": "Backtest running in background. Watch the Logs tab — email arrives when done.",
             })
 
+        # ── Tick Velocity Analytics ─────────────────────────────────
+
+        @app.route("/api/velocity-report")
+        @require_auth
+        def velocity_report():
+            """
+            Returns the full tick velocity analytics data for the dashboard.
+            Combines:
+              - tick_velocity_report.txt  (human-readable summary)
+              - tick_velocity_daily.jsonl  (last 14 days of daily aggregates)
+              - tick_velocity_hourly.jsonl (last 48 hourly records)
+              - tick_velocity_weekly.jsonl (last 4 weekly records + recommendations)
+            """
+            analytics_dir = Path(
+                __import__("os").environ.get("BOT_ANALYTICS_DIR", "/bot/analytics")
+            )
+
+            def _read_jsonl(path: Path, tail: int) -> list:
+                if not path.exists():
+                    return []
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    records = []
+                    for ln in lines[-tail:]:
+                        ln = ln.strip()
+                        if ln:
+                            try:
+                                records.append(json.loads(ln))
+                            except Exception:
+                                pass
+                    return records
+                except Exception:
+                    return []
+
+            report_text  = ""
+            report_age   = None
+            report_path  = analytics_dir / "tick_velocity_report.txt"
+            if report_path.exists():
+                try:
+                    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+                    report_age  = int(
+                        (datetime.now(tz=timezone.utc) -
+                         datetime.fromtimestamp(report_path.stat().st_mtime, tz=timezone.utc)
+                        ).total_seconds()
+                    )
+                except Exception:
+                    pass
+
+            daily   = _read_jsonl(analytics_dir / "tick_velocity_daily.jsonl",  14)
+            hourly  = _read_jsonl(analytics_dir / "tick_velocity_hourly.jsonl", 48)
+            weekly  = _read_jsonl(analytics_dir / "tick_velocity_weekly.jsonl",  4)
+
+            return jsonify({
+                "report_text":        report_text,
+                "report_age_seconds": report_age,
+                "daily":              daily,
+                "hourly":             hourly,
+                "weekly":             weekly,
+                "analytics_dir":      str(analytics_dir),
+            })
+
+        @app.route("/api/velocity-report/refresh", methods=["POST"])
+        @require_auth
+        def velocity_report_refresh():
+            """Trigger an immediate daily analytics run."""
+            try:
+                from src.application.tick_analytics import get_analytics
+                get_analytics().run_daily(datetime.now(tz=timezone.utc))
+                return jsonify({"ok": True, "message": "Daily report regenerated."})
+            except Exception as exc:
+                logger.warning("Manual velocity report refresh failed: %s", exc)
+                return jsonify({"ok": False, "error": str(exc)}), 500
+
         # ── Log tail ────────────────────────────────────────────────
 
         @app.route("/api/logs")

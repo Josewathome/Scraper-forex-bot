@@ -154,6 +154,7 @@
   <div class="tab" onclick="showTab('pairs')">Pairs</div>
   <div class="tab" onclick="showTab('config')">Configuration</div>
   <div class="tab" onclick="showTab('backtest')">Backtest</div>
+  <div class="tab" onclick="showTab('velocity')">Velocity Report</div>
   <div class="tab" onclick="showTab('logs')">Logs</div>
 </div>
 
@@ -415,6 +416,135 @@
 
 </div>
 
+<!-- VELOCITY REPORT -->
+<div class="page" id="page-velocity">
+
+  <!-- Summary cards -->
+  <div class="cards" id="velCards">
+    <div class="card">
+      <div class="card-label">Today's Evaluations</div>
+      <div class="card-value" id="vel-evals">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Velocity Pass Rate</div>
+      <div class="card-value yellow" id="vel-pass-rate">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Trades Executed</div>
+      <div class="card-value green" id="vel-executed">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Win Rate (vel-passed)</div>
+      <div class="card-value" id="vel-win-rate">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Report Age</div>
+      <div class="card-value" id="vel-age" style="font-size:16px">—</div>
+    </div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="section" style="margin-bottom:20px">
+    <div class="section-header" style="justify-content:space-between">
+      <span>Tick Velocity Analytics</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="velLastRefresh" style="font-size:11px;color:var(--muted)"></span>
+        <button class="btn btn-sm btn-ghost" onclick="loadVelocityReport()">↻ Refresh</button>
+        <button class="btn btn-sm btn-primary" onclick="forceVelocityRefresh()">⚡ Regenerate Now</button>
+      </div>
+    </div>
+    <div style="padding:14px 18px">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px;color:var(--muted)">View:</label>
+        <button class="btn btn-sm btn-ghost" id="vel-tab-daily"   onclick="setVelView('daily')"   style="border-color:var(--accent);color:var(--accent)">Daily (14d)</button>
+        <button class="btn btn-sm btn-ghost" id="vel-tab-hourly"  onclick="setVelView('hourly')">Hourly (48h)</button>
+        <button class="btn btn-sm btn-ghost" id="vel-tab-weekly"  onclick="setVelView('weekly')">Weekly</button>
+        <button class="btn btn-sm btn-ghost" id="vel-tab-report"  onclick="setVelView('report')">Raw Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Daily table -->
+  <div class="section" id="vel-view-daily">
+    <div class="section-header">Daily Breakdown</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Symbol</th>
+          <th>Evaluations</th>
+          <th>Vel Pass</th>
+          <th>Pass Rate</th>
+          <th>Executed</th>
+          <th>Wins</th>
+          <th>Win Rate</th>
+          <th>Avg PnL (pips)</th>
+          <th>Recommendation</th>
+        </tr>
+      </thead>
+      <tbody id="vel-daily-body">
+        <tr><td colspan="10" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Hourly table -->
+  <div class="section" id="vel-view-hourly" style="display:none">
+    <div class="section-header">Hourly Breakdown (last 48 records)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Hour (UTC)</th>
+          <th>Symbol</th>
+          <th>Evaluations</th>
+          <th>Vel Pass</th>
+          <th>Pass Rate</th>
+          <th>Executed</th>
+          <th>Avg Velocity</th>
+          <th>Avg Spread</th>
+        </tr>
+      </thead>
+      <tbody id="vel-hourly-body">
+        <tr><td colspan="8" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Weekly table -->
+  <div class="section" id="vel-view-weekly" style="display:none">
+    <div class="section-header">Weekly Summary + Threshold Recommendations</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Week</th>
+          <th>Symbol</th>
+          <th>Evaluations</th>
+          <th>Trades</th>
+          <th>Win Rate</th>
+          <th>Current Threshold</th>
+          <th>Recommendation</th>
+          <th>Suggested</th>
+        </tr>
+      </thead>
+      <tbody id="vel-weekly-body">
+        <tr><td colspan="8" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Raw text report -->
+  <div class="section" id="vel-view-report" style="display:none">
+    <div class="section-header">
+      Raw Velocity Report
+      <span style="font-size:11px;color:var(--muted)" id="vel-report-path"></span>
+    </div>
+    <div class="log-box" id="vel-report-box" style="height:600px;white-space:pre;font-size:12px;color:#94a3b8">
+      Loading…
+    </div>
+  </div>
+
+</div>
+
 <!-- LOGS -->
 <div class="page" id="page-logs">
   <div class="section">
@@ -565,7 +695,7 @@ async function tryRefresh() {
 // ── Tab navigation ───────────────────────────────────────────────────
 function showTab(name) {
   document.querySelectorAll('.tab').forEach((t,i)=>{
-    const names = ['analytics','pairs','config','backtest','logs'];
+    const names = ['analytics','pairs','config','backtest','velocity','logs'];
     t.classList.toggle('active', names[i]===name);
   });
   document.querySelectorAll('.page').forEach(p=>{
@@ -574,6 +704,7 @@ function showTab(name) {
   if(name==='logs')      loadLogs();
   if(name==='config')    loadBalanceHistory();
   if(name==='backtest')  { loadBacktestReports(); loadBtConfig(); }
+  if(name==='velocity')  { setVelView(_velView); loadVelocityReport(); }
 }
 
 // ── Status ───────────────────────────────────────────────────────────
@@ -1150,6 +1281,214 @@ async function downloadBtReport(filename) {
 function closeBtViewer() {
   document.getElementById('btViewerSection').style.display = 'none';
   document.getElementById('btViewerBox').textContent = '';
+}
+
+// ── Velocity Report ───────────────────────────────────────────────────
+
+let _velView = 'daily';
+let _velData = null;
+
+function setVelView(view) {
+  _velView = view;
+  ['daily','hourly','weekly','report'].forEach(v => {
+    const el  = document.getElementById('vel-view-' + v);
+    const btn = document.getElementById('vel-tab-' + v);
+    if (el)  el.style.display  = v === view ? 'block' : 'none';
+    if (btn) {
+      btn.style.borderColor = v === view ? 'var(--accent)' : 'var(--border)';
+      btn.style.color       = v === view ? 'var(--accent)' : 'var(--muted)';
+    }
+  });
+  if (_velData) _renderVelView(_velData);
+}
+
+async function loadVelocityReport() {
+  try {
+    const r = await apiFetch('/api/velocity-report');
+    const d = await r.json();
+    _velData = d;
+    _renderVelSummary(d);
+    _renderVelView(d);
+    document.getElementById('velLastRefresh').textContent =
+      'Refreshed ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    if(e.message !== 'unauthenticated') console.error('velocity report error', e);
+  }
+}
+
+async function forceVelocityRefresh() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  try {
+    const r = await apiFetch('/api/velocity-report/refresh', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      await loadVelocityReport();
+      btn.textContent = '✓ Done';
+      setTimeout(() => { btn.textContent = '⚡ Regenerate Now'; btn.disabled = false; }, 2000);
+    } else {
+      alert('Error: ' + (d.error || 'Could not regenerate.'));
+      btn.textContent = '⚡ Regenerate Now';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    btn.textContent = '⚡ Regenerate Now';
+    btn.disabled = false;
+    if(e.message !== 'unauthenticated') alert('Error: ' + e);
+  }
+}
+
+function _renderVelSummary(d) {
+  // Pull today's daily record (last entry)
+  const daily = d.daily || [];
+  const today = daily[daily.length - 1];
+
+  if (today) {
+    const total    = today.total_evaluations ?? today.evaluations ?? 0;
+    const passed   = today.velocity_passed   ?? today.vel_passed  ?? 0;
+    const executed = today.trades_executed   ?? today.executed    ?? 0;
+    const wins     = today.wins              ?? 0;
+    const passRate = total > 0 ? ((passed / total) * 100).toFixed(1) + '%' : '—';
+    const winRate  = executed > 0 ? ((wins / executed) * 100).toFixed(1) + '%' : '—';
+
+    document.getElementById('vel-evals').textContent    = total;
+    document.getElementById('vel-pass-rate').textContent = passRate;
+    document.getElementById('vel-executed').textContent  = executed;
+
+    const wrEl = document.getElementById('vel-win-rate');
+    wrEl.textContent = winRate;
+    const wrNum = executed > 0 ? wins / executed * 100 : 0;
+    wrEl.className = 'card-value ' + (wrNum >= 55 ? 'green' : wrNum >= 45 ? 'yellow' : 'red');
+  }
+
+  const ageEl = document.getElementById('vel-age');
+  if (d.report_age_seconds != null) {
+    const mins = Math.floor(d.report_age_seconds / 60);
+    const hrs  = Math.floor(mins / 60);
+    ageEl.textContent = hrs > 0 ? `${hrs}h ${mins % 60}m ago` : `${mins}m ago`;
+    ageEl.className   = 'card-value ' + (d.report_age_seconds > 7200 ? 'red' : 'yellow');
+  } else {
+    ageEl.textContent = 'No report yet';
+    ageEl.className   = 'card-value red';
+  }
+}
+
+function _renderVelView(d) {
+  if (_velView === 'daily')  _renderVelDaily(d.daily  || []);
+  if (_velView === 'hourly') _renderVelHourly(d.hourly || []);
+  if (_velView === 'weekly') _renderVelWeekly(d.weekly || []);
+  if (_velView === 'report') _renderVelReport(d);
+}
+
+function _renderVelDaily(rows) {
+  const tbody = document.getElementById('vel-daily-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No daily data yet. Reports generate at 22:00 UTC.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = [...rows].reverse().map(r => {
+    const total    = r.total_evaluations ?? r.evaluations ?? 0;
+    const passed   = r.velocity_passed   ?? r.vel_passed  ?? 0;
+    const executed = r.trades_executed   ?? r.executed    ?? 0;
+    const wins     = r.wins ?? 0;
+    const passRate = total   > 0 ? ((passed   / total)    * 100).toFixed(1) + '%' : '—';
+    const winRate  = executed > 0 ? ((wins     / executed) * 100).toFixed(1) + '%' : '—';
+    const avgPnl   = r.avg_pnl_pips != null ? (r.avg_pnl_pips >= 0 ? '+' : '') + r.avg_pnl_pips.toFixed(2) : '—';
+    const rec      = r.recommendation ?? '';
+    const recColor = rec === 'RAISE' ? 'var(--yellow)' : rec === 'LOWER' ? 'var(--accent)' : 'var(--muted)';
+    const suggested = r.suggested_threshold != null ? r.suggested_threshold.toFixed(2) : '—';
+    const date     = r.date ?? r.hour?.slice(0, 10) ?? '?';
+    const symbol   = r.symbol ?? 'ALL';
+
+    return `<tr>
+      <td>${escHtml(date)}</td>
+      <td><strong>${escHtml(symbol)}</strong></td>
+      <td>${total}</td>
+      <td>${passed}</td>
+      <td>${passRate}</td>
+      <td>${executed}</td>
+      <td class="pnl-pos">${wins}</td>
+      <td class="${winRateClass(wins, executed)}">${winRate}</td>
+      <td class="${avgPnl.startsWith('+') ? 'pnl-pos' : avgPnl === '—' ? '' : 'pnl-neg'}">${escHtml(avgPnl)}</td>
+      <td style="color:${recColor};font-weight:600">${escHtml(rec || '—')}${suggested !== '—' ? ' → ' + suggested : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _renderVelHourly(rows) {
+  const tbody = document.getElementById('vel-hourly-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No hourly data yet. Reports generate every hour.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = [...rows].reverse().map(r => {
+    const total    = r.total_evaluations ?? r.evaluations ?? 0;
+    const passed   = r.velocity_passed   ?? r.vel_passed  ?? 0;
+    const executed = r.trades_executed   ?? r.executed    ?? 0;
+    const passRate = total > 0 ? ((passed / total) * 100).toFixed(1) + '%' : '—';
+    const avgVel   = r.avg_velocity   != null ? r.avg_velocity.toFixed(2)   : '—';
+    const avgSpread = r.avg_spread_pips != null ? r.avg_spread_pips.toFixed(2) : '—';
+    const hour     = r.hour ?? r.date ?? '?';
+    const symbol   = r.symbol ?? 'ALL';
+    return `<tr>
+      <td style="font-size:12px">${escHtml(hour)}</td>
+      <td><strong>${escHtml(symbol)}</strong></td>
+      <td>${total}</td>
+      <td>${passed}</td>
+      <td>${passRate}</td>
+      <td>${executed}</td>
+      <td style="color:var(--yellow)">${avgVel}</td>
+      <td style="color:var(--muted)">${avgSpread}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _renderVelWeekly(rows) {
+  const tbody = document.getElementById('vel-weekly-body');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No weekly data yet. Reports generate every Friday at 21:00 UTC.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = [...rows].reverse().map(r => {
+    const total     = r.total_evaluations ?? r.evaluations ?? 0;
+    const executed  = r.trades_executed   ?? r.executed    ?? 0;
+    const wins      = r.wins ?? 0;
+    const winRate   = executed > 0 ? ((wins / executed) * 100).toFixed(1) + '%' : '—';
+    const threshold = r.current_threshold ?? r.threshold ?? '—';
+    const rec       = r.recommendation ?? '—';
+    const suggested = r.suggested_threshold != null ? r.suggested_threshold.toFixed(2) : '—';
+    const recColor  = rec === 'RAISE' ? 'var(--yellow)' : rec === 'LOWER' ? 'var(--accent)' : 'var(--muted)';
+    const week      = r.week ?? r.date ?? '?';
+    const symbol    = r.symbol ?? 'ALL';
+    return `<tr>
+      <td style="font-size:12px">${escHtml(week)}</td>
+      <td><strong>${escHtml(symbol)}</strong></td>
+      <td>${total}</td>
+      <td>${executed}</td>
+      <td class="${winRateClass(wins, executed)}">${winRate}</td>
+      <td style="color:var(--muted)">${typeof threshold === 'number' ? threshold.toFixed(2) : threshold}</td>
+      <td style="color:${recColor};font-weight:600">${escHtml(rec)}</td>
+      <td style="color:var(--accent)">${suggested}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _renderVelReport(d) {
+  const box = document.getElementById('vel-report-box');
+  if (!d.report_text) {
+    box.textContent = 'No report file found yet.\n\nReports are generated at 22:00 UTC daily.\nClick "⚡ Regenerate Now" to create one immediately.';
+    return;
+  }
+  box.textContent = d.report_text;
+  const pathEl = document.getElementById('vel-report-path');
+  if (pathEl && d.analytics_dir) pathEl.textContent = d.analytics_dir + '/tick_velocity_report.txt';
+}
+
+function winRateClass(wins, executed) {
+  if (!executed) return '';
+  const pct = wins / executed * 100;
+  return pct >= 55 ? 'pnl-pos' : pct >= 45 ? '' : 'pnl-neg';
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────
