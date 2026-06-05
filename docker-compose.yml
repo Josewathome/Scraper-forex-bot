@@ -1,6 +1,6 @@
 # Before first run: copy .env.example to .env and fill in your real credentials.
 # Docker Compose reads .env automatically for ${VAR} substitution below.
-# Dashboard: http://localhost:8000   |   MT5 VNC: http://localhost:3000
+# Dashboard: http://localhost:8001   |   MT5 VNC: http://localhost:3001
 
 services:
   scalper-prime:

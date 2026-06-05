@@ -468,21 +468,21 @@ fi
 # /config is a persistent Docker volume — ready_to_trade survives
 # container restarts and power cuts so the bot resumes automatically.
 # Only missing on the very first run, or after:
-#   docker exec mt5 rm /config/ready_to_trade  (manual reset)
+#   docker exec scalper-prime rm /config/ready_to_trade  (manual reset)
 if [ ! -f /config/ready_to_trade ]; then
     echo ""
     echo "════════════════════════════════════════════════════════"
-    echo "  Zone Bot — first-run setup required"
+    echo "  Scalper Bot — first-run setup required"
     echo "════════════════════════════════════════════════════════"
     echo ""
-    echo "  1. Open http://localhost:3000 — confirm MT5 is logged in"
+    echo "  1. Open http://localhost:3001 — confirm MT5 is logged in"
     echo "     and charts are loaded"
     echo "  2. Tools → Options → Expert Advisors"
-    echo "     → ✅ Allow Algorithmic Trading"
+    echo "     → Allow Algorithmic Trading"
     echo "  3. Run this command to start the bot:"
-    echo "     docker exec mt5 touch /config/ready_to_trade"
+    echo "     docker exec scalper-prime touch /config/ready_to_trade"
     echo ""
-    echo "  Waiting for ready_to_trade signal…"
+    echo "  Waiting for ready_to_trade signal..."
     while [ ! -f /config/ready_to_trade ]; do
         sleep 5
     done

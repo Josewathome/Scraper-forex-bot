@@ -70,10 +70,11 @@ import src.config as config
 logger = logging.getLogger(__name__)
 
 # ── Directory setup ────────────────────────────────────────────────────────────
-_ANALYTICS_DIR = os.path.join(
-    getattr(config, "CHECKPOINT_DIR", ".checkpoints").replace(".checkpoints", ""),
-    "analytics",
-)
+# Anchor to /bot which is always the Docker volume mount point.
+# Relative paths resolve inside the Wine C: drive where Python has no
+# write permission.  /bot is the host directory mounted at container start.
+_BOT_DIR       = os.environ.get("BOT_DIR", "/bot")
+_ANALYTICS_DIR = os.path.join(_BOT_DIR, "analytics")
 
 _RAW_FILE     = os.path.join(_ANALYTICS_DIR, "tick_velocity_raw.jsonl")
 _HOURLY_FILE  = os.path.join(_ANALYTICS_DIR, "tick_velocity_hourly.jsonl")
