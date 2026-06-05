@@ -4,13 +4,8 @@
 # Replaces the default /Metatrader/start.sh via volume mount in docker-compose.yml.
 
 mt5file='/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe'
-# MetaEditor — try both capitalizations since Wine ext4 is case-sensitive
-# and the installer may produce MetaEditor64.exe or metaeditor64.exe.
-if [ -e '/config/.wine/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe' ]; then
-    metaeditor='/config/.wine/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe'
-else
-    metaeditor='/config/.wine/drive_c/Program Files/MetaTrader 5/metaeditor64.exe'
-fi
+# MetaEditor path is resolved lazily at compile time (after MT5 installs) — see _resolve_metaeditor().
+metaeditor=''
 export WINEPREFIX='/config/.wine'
 export WINEDEBUG='-all'
 wine_executable="wine"
@@ -560,6 +555,14 @@ if [ -f "${EA_SRC}" ]; then
     # before it can compile — if we run it too early the compile silently
     # produces nothing.  Poll the MT5 log for "terminal synchronized" (which
     # only appears AFTER the broker handshake is complete) before compiling.
+    #
+    # Resolve metaeditor path HERE (after MT5 install) — not at script start
+    # where MT5 may not be installed yet (fresh volume → binary missing).
+    if [ -e '/config/.wine/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe' ]; then
+        metaeditor='/config/.wine/drive_c/Program Files/MetaTrader 5/MetaEditor64.exe'
+    elif [ -e '/config/.wine/drive_c/Program Files/MetaTrader 5/metaeditor64.exe' ]; then
+        metaeditor='/config/.wine/drive_c/Program Files/MetaTrader 5/metaeditor64.exe'
+    fi
     if [ -e "$metaeditor" ]; then
         MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
         _compile_wait=0
