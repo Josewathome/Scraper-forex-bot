@@ -521,20 +521,7 @@ fi
 show_message "[5/6] Pinning numpy<2 for stability..."
 $wine_executable python -m pip install --no-cache-dir "numpy<2" --quiet
 
-# ── [5.5/6] pyzmq for Wine Python ────────────────────────────────
-# pyzmq must be installed inside Wine Python (not the Linux system Python)
-# because the bot runs as `wine python`. pyzmq bundles its own libzmq
-# shared library — it does NOT use the zmq.dll we installed for the MQL5 EA.
-# The two ZMQ instances (EA side / Python side) are completely independent
-# C libraries that communicate over Wine's loopback TCP stack.
-show_message "[5.5/6] Installing pyzmq in Wine Python..."
-if ! is_wine_python_package_installed "pyzmq"; then
-    # Pin to zmq 24.x — compatible with Python 3.9 and the bundled libzmq 4.3.x
-    $wine_executable python -m pip install --no-cache-dir "pyzmq>=24,<26" --quiet
-    show_message "[5.5/6] pyzmq installed."
-else
-    show_message "[5.5/6] pyzmq already installed."
-fi
+show_message "[5.5/6] pyzmq skipped — EA v3 uses MT5 built-in sockets; Python side uses plain TCP."
 
 # ── [6/6] Bot dependencies ────────────────────────────────────────
 show_message "[6/6] Installing bot dependencies in Wine Python..."
@@ -577,9 +564,14 @@ EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
 EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
 EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
 AUTO_TRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
-# Record whether the compiled EA already existed before this startup run.
-# Used later to decide if MT5 needs a restart after compilation.
-[ -f "${EA_EX5}" ] && _ex5_existed=1 || _ex5_existed=0
+# Always delete the old .ex5 so the EA is recompiled from the current source
+# on every startup. This ensures the correct version (v3, built-in sockets,
+# no DLL imports) is always running, regardless of what was compiled before.
+if [ -f "${EA_EX5}" ]; then
+    rm -f "${EA_EX5}"
+    show_message "Old ZoneBotBridge.ex5 removed — will recompile fresh."
+fi
+_ex5_existed=0
 
 # Ensure directories exist (MT5 should have created them, but be safe)
 mkdir -p "${MT5_EXPERTS_DIR}" "${MT5_CONFIG_DIR}"
