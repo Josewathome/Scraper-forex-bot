@@ -153,19 +153,10 @@ if [ -f "${MT5_INSTALL_DIR}/config/metaeditor.ini" ]; then
 fi
 show_message "[3/6] Account cache preserved (session files kept for reconnect)."
 
-# ── [3.5/6] ZMQ library installation ─────────────────────────────
-# Both the MQL5 EA and the Python bot communicate over ZeroMQ.
-# The EA needs:
-#   - zmq.dll in MQL5/Libraries/ (the real Win64 libzmq DLL)
-#   - Zmq/ folder in MQL5/Include/ (MQL5 wrapper)
-# The Python bot needs:
-#   - pyzmq installed under Wine Python
-#
-# WHY zmq.dll lives in MQL5/Libraries/ and NOT the Wine system DLL path:
-#   MetaTrader 5 loads DLLs imported by EAs from MQL5/Libraries/ first,
-#   then falls back to Windows system paths. Placing it here avoids
-#   any Wine DLL override complexity and keeps MT5 self-contained.
-#   The Python pyzmq package bundles its own libzmq — no shared object.
+# ── [3.5/6] ZMQ library (legacy — kept for volume compatibility) ──────────────
+# EA v3 uses MT5 built-in sockets, not libzmq.dll. This section is a no-op
+# on containers that already have /config/.zmq_installed marker. It only runs
+# on fresh volumes — harmless but skipped immediately on restart.
 
 MT5_MQL5_DIR="${MT5_INSTALL_DIR}/MQL5"
 MT5_LIBS_DIR="${MT5_MQL5_DIR}/Libraries"
@@ -576,13 +567,7 @@ _ex5_existed=0
 # Ensure directories exist (MT5 should have created them, but be safe)
 mkdir -p "${MT5_EXPERTS_DIR}" "${MT5_CONFIG_DIR}"
 
-# Re-copy ZMQ DLLs now that MQL5/Libraries/ is confirmed to exist
-if [ -f "${MT5_LIBS_DIR}/libzmq.dll" ] || [ -f "${MT5_LIBS_DIR}/zmq.dll" ]; then
-    show_message "ZMQ DLLs already in MQL5/Libraries/."
-else
-    show_message "WARNING: ZMQ DLLs missing from MQL5/Libraries/ — EA will fail to compile."
-    show_message "Run: docker compose restart   to trigger re-download."
-fi
+# EA v3 uses MT5 built-in sockets — no ZMQ DLLs needed for compile or runtime.
 
 if [ -f "${EA_SRC}" ]; then
     cp "${EA_SRC}" "${EA_DST}"
