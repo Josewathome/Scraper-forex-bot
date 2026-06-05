@@ -420,7 +420,7 @@ else:
     text = data.decode('utf-8', errors='replace')
     enc, bom = 'utf-8', b''
 lines = text.splitlines()
-in_common = has_expert = False
+in_common = has_expert = has_dll = False
 new_lines = []
 for line in lines:
     s = line.strip()
@@ -429,14 +429,22 @@ for line in lines:
     elif s.startswith('[') and s.endswith(']'):
         if in_common and not has_expert:
             new_lines.append('ExpertAdvisors=1')
+        if in_common and not has_dll:
+            new_lines.append('AllowDll=1')
         in_common = False
     if in_common and s.startswith('ExpertAdvisors='):
         new_lines.append('ExpertAdvisors=1')
         has_expert = True
         continue
+    if in_common and s.startswith('AllowDll='):
+        new_lines.append('AllowDll=1')
+        has_dll = True
+        continue
     new_lines.append(line)
 if in_common and not has_expert:
     new_lines.append('ExpertAdvisors=1')
+if in_common and not has_dll:
+    new_lines.append('AllowDll=1')
 result = '\r\n'.join(new_lines) + '\r\n'
 open(path, 'wb').write(bom + result.encode(enc))
 print('terminal.ini: ExpertAdvisors=1 set')
