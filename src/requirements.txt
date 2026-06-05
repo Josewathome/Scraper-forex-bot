@@ -1,6 +1,4 @@
-﻿# ZeroMQ — event-driven EA-to-bot streaming (installed in Wine Python)
-pyzmq>=24,<26
-Flask>=3.0,<4
+﻿Flask>=3.0,<4
 Werkzeug>=3.0
 Jinja2>=3.0
 click>=8.0,<8.2
