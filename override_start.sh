@@ -542,6 +542,9 @@ EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
 EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
 EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
 AUTO_TRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
+# Record whether the compiled EA already existed before this startup run.
+# Used later to decide if MT5 needs a restart after compilation.
+[ -f "${EA_EX5}" ] && _ex5_existed=1 || _ex5_existed=0
 
 # Ensure directories exist (MT5 should have created them, but be safe)
 mkdir -p "${MT5_EXPERTS_DIR}" "${MT5_CONFIG_DIR}"
@@ -616,6 +619,10 @@ for line in data.splitlines():
         _compile_log="${MT5_EXPERTS_DIR}/ZoneBotBridge.log"
         if [ -f "${EA_EX5}" ]; then
             show_message "ZoneBotBridge.ex5 compiled successfully."
+            # Only flag as "freshly compiled" if the .ex5 didn't exist before
+            # this run — avoids an unnecessary MT5 restart on every container
+            # restart when the binary is already present from a previous run.
+            [ "${_ex5_existed:-0}" -eq 0 ] && _ex5_compiled=1 || true
         else
             show_message "WARNING: ZoneBotBridge.ex5 not produced."
             if [ -f "${_compile_log}" ]; then
@@ -755,20 +762,24 @@ PYEOF
     # Restart MT5 ONLY when the chart was freshly modified (exit 0).
     # When the EA was already in the chart (exit 2) MT5 already has it loaded —
     # restarting would waste 25 s and briefly drop the broker connection.
-    if [ "${_chart_inject_result}" -eq 0 ]; then
-        show_message "Chart modified — restarting MT5 so it loads the injected EA..."
-        # taskkill is the Windows-native way to stop a process by name inside Wine.
-        # || true: if MT5 already exited for any reason, this is harmless.
-        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+    # Restart MT5 if:
+    #   exit=0 → chart was freshly modified (EA just injected), OR
+    #   _ex5_compiled=1 → .ex5 was just compiled in this run.
+    # The second condition is critical: MT5 started before the .ex5 existed
+    # (pre-launch injects the chart entry but the .ex5 isn't compiled until
+    # after the ready_to_trade gate). Without a restart here, MT5 silently
+    # skips the EA on startup and never retries — OnInit() never fires.
+    if [ "${_chart_inject_result}" -eq 0 ] || [ "${_ex5_compiled:-0}" -eq 1 ]; then
+        show_message "Restarting MT5 to load compiled EA (chart_modified=${_chart_inject_result}, ex5_compiled=${_ex5_compiled:-0})..."
+        pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+            $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
         sleep 5
-        # Re-apply ExpertAdvisors=1 before restart so AutoTrading is enabled.
         _patch_terminal_ini
-        # Relaunch MT5 in the background (same way as the initial launch above).
         $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
-        show_message "MT5 restarted — waiting 20s for EA to bind ZMQ PUB socket..."
-        sleep 20
+        show_message "MT5 restarted — waiting 25s for EA to bind ZMQ PUB socket..."
+        sleep 25
     else
-        show_message "EA already present in chart — MT5 restart skipped."
+        show_message "EA and .ex5 already present from previous run — MT5 restart skipped."
     fi
 fi
 
