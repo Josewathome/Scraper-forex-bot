@@ -141,12 +141,11 @@ class ScalperAlignmentEngine:
             direction = None
             raw_score = min(raw_score, min_score - 0.01)  # force block
 
-        # Regime: use M5 ATR ratio as ranging detector
+        # Regime: use M5 ATR ratio as ranging detector (informational — no penalty)
         regime = self._detect_regime(m5_candles)
-
-        # Ranging penalty: raise effective threshold
-        if regime == Regime.RANGING:
-            raw_score *= 0.90  # 10% penalty keeps ranging markets from passing
+        # Ranging regime is logged for analytics; it does not reduce score.
+        # The alignment threshold and tick velocity gate already suppress
+        # low-momentum entries without an artificial score haircut.
 
         details = {
             "m1_score":    f"{m1_score:.2f}",

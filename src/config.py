@@ -76,9 +76,9 @@ HFM_COMMISSION_USD_DEFAULT: float = 3.0
 # ── Risk Management ────────────────────────────────────────────────
 RISK_PERCENT        = 2.0
 COMMISSION_PER_LOT  = 3.0  # USD/lot (per side) — default for major pairs
-MIN_RR              = 2.0
-MAX_OPEN_TRADES     = 6
-MAX_TRADES_PER_SYMBOL = 1
+MIN_RR              = 1.5
+MAX_OPEN_TRADES     = 20   # Soft reference — enforced by margin, not a hard gate
+MAX_TRADES_PER_SYMBOL = 10  # Soft reference — no per-symbol hard gate in entry_gate
 MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
 
 # ── Margin Safety ────────────────────────────────────────────────
@@ -133,8 +133,10 @@ MONITOR_CLOSE_CONVICTION    = 2
 
 BREAKEVEN_RR_TRIGGER        = 1.5
 
-MAX_CONSECUTIVE_LOSSES      = 2
-LOSS_STREAK_PAUSE_HOURS     = 4
+# Loss streak: tracked for analytics only — no trading pause enforced.
+# Set LOSS_STREAK_PAUSE_HOURS = 0 to disable pause (default).
+MAX_CONSECUTIVE_LOSSES      = 5   # Streak length before logging a warning
+LOSS_STREAK_PAUSE_HOURS     = 0   # 0 = no pause; raise in .env if desired
 
 # ── Multi-level Take Profit ────────────────────────────────────────
 TIERED_TP_ENABLED        = True
@@ -220,11 +222,11 @@ SCALPER_SESSION_END_UTC:   int = int(os.environ.get("SCALPER_SESSION_END_UTC",  
 # Override any symbol via env var: SCALPER_SESSION_GBPUSD_START=8
 # (not yet wired — edit here directly if you need to adjust)
 SCALPER_SYMBOL_SESSIONS: dict = {
-    "GBPUSD": (6,  16),
-    "XAUUSD": (6,  20),
-    "USDJPY": (0,  16),
-    "AUDUSD": (0,  12),
-    "USDCHF": (6,  16),
+    "GBPUSD": (5,  17),   # Pre-London open → NY close
+    "XAUUSD": (5,  22),   # Pre-London → EU afterhours
+    "USDJPY": (0,  17),   # Full Asian + London + NY
+    "AUDUSD": (22, 13),   # Sydney open (wraps midnight) → London midday
+    "USDCHF": (5,  17),   # European pair, matches GBPUSD
 }
 
 # ── Tick velocity gate ────────────────────────────────────────────────────
@@ -241,7 +243,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.5"))
+SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.0"))
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
@@ -254,27 +256,31 @@ SCALPER_MIN_SL_PIPS: dict = {
 SCALPER_MIN_SL_PIPS_DEFAULT: float = 3.0
 
 SCALPER_MAX_SL_PIPS: dict = {
-    "GBPUSD": 8.0,
-    "XAUUSD": 25.0,
-    "USDJPY": 8.0,
-    "AUDUSD": 8.0,
-    "USDCHF": 8.0,
-    "EURUSD": 8.0,
+    "GBPUSD": 12.0,
+    "XAUUSD": 40.0,
+    "USDJPY": 12.0,
+    "AUDUSD": 12.0,
+    "USDCHF": 12.0,
+    "EURUSD": 12.0,
 }
-SCALPER_MAX_SL_PIPS_DEFAULT: float = 8.0
+SCALPER_MAX_SL_PIPS_DEFAULT: float = 12.0
 
 SCALPER_TP1_RR: float = float(os.environ.get("SCALPER_TP1_RR", "1.5"))
 SCALPER_TP2_RR: float = float(os.environ.get("SCALPER_TP2_RR", "2.0"))
 
 SCALPER_MAX_HOLD_MINUTES: int = int(os.environ.get("SCALPER_MAX_HOLD_MINUTES", "30"))
 
-SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "20"))
+# No hard daily trade cap — frequency is bounded by margin + EV gate only.
+# Set SCALPER_MAX_DAILY_TRADES = 0 to disable the cap entirely.
+SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "0"))
 
-SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "3"))
+# No global open-trade cap — margin validation prevents over-exposure.
+# Set SCALPER_MAX_OPEN_TRADES = 0 to disable.
+SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "0"))
 
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.60"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.65"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.40"))
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.55"))
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
 
 SCALPER_M5_EMA_PERIOD: int = int(os.environ.get("SCALPER_M5_EMA_PERIOD", "10"))
 
@@ -290,4 +296,25 @@ TP2_RR_RATIO: float = SCALPER_TP2_RR
 STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "true").lower() == "true"
 
 # ── Daily drawdown limit ──────────────────────────────────────────
-DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "2.0"))
+DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "6.0"))
+
+# ── EV (Expected Value) gate ──────────────────────────────────────
+# Minimum expected value in pips for a trade to be taken.
+# EV = (estimated_win_rate × avg_win_pips) − ((1 − win_rate) × avg_loss_pips)
+# Uses rolling win rate from tick analytics if available; falls back to
+# ASSUMED_WIN_RATE. A positive EV confirms the edge is real after costs.
+ASSUMED_WIN_RATE:        float = float(os.environ.get("ASSUMED_WIN_RATE",        "0.52"))
+EV_MIN_PIPS:             float = float(os.environ.get("EV_MIN_PIPS",             "0.10"))
+
+# ── Duplicate-trade guard ─────────────────────────────────────────
+# Prevents re-entering the same symbol in the same direction within
+# ANTI_DUPE_SECONDS seconds of the last fill.  Blocks runaway loops
+# without capping total daily volume.
+ANTI_DUPE_SECONDS:       int   = int(os.environ.get("ANTI_DUPE_SECONDS",         "60"))
+
+# ── Margin safety ─────────────────────────────────────────────────
+# Minimum margin level (%) required before a new trade is allowed.
+# MT5 issues a margin call at 100%; we block at MIN_MARGIN_LEVEL.
+MIN_MARGIN_LEVEL_PCT:    float = float(os.environ.get("MIN_MARGIN_LEVEL_PCT",    "200.0"))
+# How many times the required margin must be available as free margin.
+MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.5"))

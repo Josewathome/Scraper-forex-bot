@@ -89,9 +89,9 @@ class StrategyManager:
       MAX_VOLATILITY_BURST = 2.5   (tick range explosion — noise/news)
     """
 
-    MIN_ALIGNMENT_SCORE  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.60)
-    MIN_TICK_SCORE       = getattr(config, "SCALPER_MIN_TICK_SCORE", 0.65)
-    MIN_CANDLE_SCORE_ABS = getattr(config, "SCALPER_MIN_CANDLE_SCORE", 0.40)
+    MIN_ALIGNMENT_SCORE  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.55)
+    MIN_TICK_SCORE       = getattr(config, "SCALPER_MIN_TICK_SCORE",      0.55)
+    MIN_CANDLE_SCORE_ABS = getattr(config, "SCALPER_MIN_CANDLE_SCORE",   0.30)
     MAX_VOLATILITY_BURST = 2.5
 
     def __init__(self, symbols: List[str]) -> None:

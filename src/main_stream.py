@@ -635,9 +635,10 @@ def _run_strategy_evaluation(
         trade = exec_svc.execute_entry_candidate(candidate)
         if trade:
             entry_gate.record_trade()
+            entry_gate.record_fill(symbol, signal.direction)
             logger.info(
                 "STRATEGY_TRADE [%s] %s | conf=%.2f | %.2f lots | "
-                "entry=%.5f SL=%.5f TP1=%.5f",
+                "entry=%.5f SL=%.5f TP1=%.5f | daily_total=%d",
                 symbol,
                 signal.direction.value.upper(),
                 signal.confidence,
@@ -645,6 +646,7 @@ def _run_strategy_evaluation(
                 trade.entry_price,
                 trade.stop_loss,
                 trade.take_profit,
+                entry_gate.daily_trade_count(),
             )
     except Exception as exc:
         logger.exception("Strategy trade execution [%s]: %s", symbol, exc)
