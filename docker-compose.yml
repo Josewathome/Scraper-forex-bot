@@ -43,7 +43,7 @@ services:
       - ./override_start.sh:/Metatrader/start.sh
       - .:/bot                                            # code + persistent data on host
       - news_cache:/bot/.cache                            # news API cache — in-container, wiped Friday
-      - zones_data:/bot/zones                             # zone snapshots — in-container, wiped Friday
+      # zones_data volume removed — zone infrastructure deleted, scalper uses M1 structure only
 
 volumes:
   mt5_config:
@@ -52,9 +52,6 @@ volumes:
   news_cache:               # news API TTL cache — wiped every Friday at market close
     external: true
     name: forex_bot_news_cache
-  zones_data:               # zone snapshots — wiped every Friday at market close, remapped Monday open
-    external: true
-    name: forex_bot_zones_data
 
 networks:
   default: {}
