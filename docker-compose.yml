@@ -11,8 +11,8 @@ services:
                               # handler and flush a final checkpoint before SIGKILL.
                               # Default Docker timeout is 10s — too short for MT5 + Wine.
     ports:
-      - "3000:3000"       # noVNC browser UI → http://localhost:3000
-      - "8000:8080"       # Trading dashboard → http://localhost:8000
+      - "3001:3000"       # noVNC browser UI → http://localhost:3001
+      - "8001:8080"       # Trading dashboard → http://localhost:8001
     env_file:
       - .env              # hard-fail if .env is missing (prevents silent empty-credential start)
     environment:
