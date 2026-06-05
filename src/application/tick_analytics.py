@@ -148,7 +148,16 @@ class TickAnalytics:
     """
 
     def __init__(self) -> None:
-        os.makedirs(_ANALYTICS_DIR, exist_ok=True)
+        if not os.path.isdir(_ANALYTICS_DIR):
+            logger.warning(
+                "TickAnalytics: directory does not exist: %s — analytics will be disabled. "
+                "Fix: add './analytics:/bot/analytics' bind mount in docker-compose.yml "
+                "and run 'mkdir -p analytics' on the host before starting the container.",
+                _ANALYTICS_DIR,
+            )
+            self._disabled = True
+        else:
+            self._disabled = False
         self._lock      = threading.Lock()
         self._pending:  Dict[str, VelocityEval] = {}   # eval_id → eval (awaiting outcome)
         self._hourly:   List[VelocityEval]       = []   # buffer for current hour
@@ -157,7 +166,8 @@ class TickAnalytics:
         self._last_hour = -1
         self._last_day  = -1
         self._last_week = -1
-        logger.info("TickAnalytics initialised — writing to %s", _ANALYTICS_DIR)
+        if not self._disabled:
+            logger.info("TickAnalytics initialised — writing to %s", _ANALYTICS_DIR)
 
     # ── Public API called by EntryGate ─────────────────────────────────
 
@@ -176,6 +186,8 @@ class TickAnalytics:
         Record one gate evaluation.  Called by EntryGate.evaluate() every
         time a signal reaches the velocity check.
         """
+        if self._disabled:
+            return
         record = VelocityEval(
             eval_id=eval_id,
             timestamp=now.isoformat(),
@@ -197,6 +209,8 @@ class TickAnalytics:
 
     def record_trade_executed(self, eval_id: str) -> None:
         """Call from EntryGate after execute_entry_candidate confirms the order."""
+        if self._disabled:
+            return
         with self._lock:
             rec = self._pending.get(eval_id)
             if rec:
@@ -213,20 +227,23 @@ class TickAnalytics:
         Called by ExecutionService._journal_close().
         Eval_id is the ticket number cast to string.
         """
+        if self._disabled:
+            return
         with self._lock:
             rec = self._pending.pop(eval_id, None)
             if rec is None:
-                # Already flushed or not tracked — write a standalone outcome patch
                 logger.debug("TickAnalytics: outcome for unknown eval_id=%s (already flushed)", eval_id)
                 return
             rec.outcome = outcome
             rec.pips    = round(pips, 2)
-            self._write_raw(rec)   # overwrite with final outcome
+            self._write_raw(rec)
 
     # ── Scheduled report triggers ──────────────────────────────────────
 
     def run_hourly(self, now: datetime) -> None:
         """Call once per hour from Scheduler."""
+        if self._disabled:
+            return
         with self._lock:
             if not self._hourly:
                 return
@@ -244,6 +261,8 @@ class TickAnalytics:
 
     def run_daily(self, now: datetime) -> None:
         """Call once per day from Scheduler."""
+        if self._disabled:
+            return
         with self._lock:
             if not self._daily:
                 return
@@ -264,6 +283,8 @@ class TickAnalytics:
 
     def run_weekly(self, now: datetime) -> None:
         """Call once per week from Scheduler."""
+        if self._disabled:
+            return
         with self._lock:
             if not self._weekly:
                 return

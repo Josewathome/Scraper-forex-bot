@@ -43,6 +43,9 @@ services:
       - ./override_start.sh:/Metatrader/start.sh
       - .:/bot                                            # code + persistent data on host
       - news_cache:/bot/.cache                            # news API cache — in-container, wiped Friday
+      - ./analytics:/bot/analytics                        # tick velocity analytics — persisted on host
+      - ./.checkpoints:/bot/.checkpoints                  # restart checkpoints — persisted on host
+      - ./logs:/bot/logs                                  # trading logs — persisted on host
       # zones_data volume removed — zone infrastructure deleted, scalper uses M1 structure only
 
 volumes:
