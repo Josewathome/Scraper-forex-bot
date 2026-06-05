@@ -420,34 +420,69 @@ else:
     text = data.decode('utf-8', errors='replace')
     enc, bom = 'utf-8', b''
 lines = text.splitlines()
-in_common = has_expert = has_dll = False
+
+# Track state for [Common] and [Expert] sections
+in_common = False
+in_expert  = False
+has_experts_common = False   # ExpertAdvisors= in [Common]
+has_dll_expert     = False   # AllowDll= in [Expert]
+has_live_expert    = False   # AllowLive= in [Expert]
+has_import_expert  = False   # AllowImport= in [Expert]
+has_expert_section = False   # [Expert] section exists at all
+
 new_lines = []
 for line in lines:
     s = line.strip()
+    # Section transitions
     if s == '[Common]':
         in_common = True
-    elif s.startswith('[') and s.endswith(']'):
-        if in_common and not has_expert:
-            new_lines.append('ExpertAdvisors=1')
-        if in_common and not has_dll:
-            new_lines.append('AllowDll=1')
+        in_expert  = False
+    elif s == '[Expert]':
         in_common = False
+        in_expert  = True
+        has_expert_section = True
+    elif s.startswith('[') and s.endswith(']'):
+        # Leaving a section — flush any missing keys before the next section header
+        if in_common and not has_experts_common:
+            new_lines.append('ExpertAdvisors=1')
+        if in_expert:
+            if not has_dll_expert:    new_lines.append('AllowDll=1')
+            if not has_live_expert:   new_lines.append('AllowLive=1')
+            if not has_import_expert: new_lines.append('AllowImport=1')
+        in_common = False
+        in_expert  = False
+
+    # Rewrite known keys to force-enable them
     if in_common and s.startswith('ExpertAdvisors='):
-        new_lines.append('ExpertAdvisors=1')
-        has_expert = True
-        continue
-    if in_common and s.startswith('AllowDll='):
-        new_lines.append('AllowDll=1')
-        has_dll = True
-        continue
+        new_lines.append('ExpertAdvisors=1'); has_experts_common = True; continue
+    if in_expert and s.startswith('AllowDll='):
+        new_lines.append('AllowDll=1');    has_dll_expert    = True; continue
+    if in_expert and s.startswith('AllowLive='):
+        new_lines.append('AllowLive=1');   has_live_expert   = True; continue
+    if in_expert and s.startswith('AllowImport='):
+        new_lines.append('AllowImport=1'); has_import_expert = True; continue
+
     new_lines.append(line)
-if in_common and not has_expert:
+
+# Flush if the last section was [Common] or [Expert] (no trailing section header)
+if in_common and not has_experts_common:
     new_lines.append('ExpertAdvisors=1')
-if in_common and not has_dll:
+if in_expert:
+    if not has_dll_expert:    new_lines.append('AllowDll=1')
+    if not has_live_expert:   new_lines.append('AllowLive=1')
+    if not has_import_expert: new_lines.append('AllowImport=1')
+
+# If [Expert] section never existed at all, append it
+if not has_expert_section:
+    new_lines.append('')
+    new_lines.append('[Expert]')
     new_lines.append('AllowDll=1')
+    new_lines.append('AllowLive=1')
+    new_lines.append('AllowImport=1')
+
 result = '\r\n'.join(new_lines) + '\r\n'
 open(path, 'wb').write(bom + result.encode(enc))
-print('terminal.ini: ExpertAdvisors=1 set')
+print('terminal.ini patched: ExpertAdvisors=1 AllowDll=1 AllowLive=1 AllowImport=1')
 _PATCH_PYEOF
 }
 _patch_terminal_ini
