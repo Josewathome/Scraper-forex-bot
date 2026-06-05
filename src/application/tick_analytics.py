@@ -148,7 +148,11 @@ class TickAnalytics:
     """
 
     def __init__(self) -> None:
-        if not os.path.isdir(_ANALYTICS_DIR):
+        # Check master kill-switch first
+        if not getattr(config, "TICK_ANALYTICS_ENABLED", True):
+            logger.info("TickAnalytics: disabled via TICK_ANALYTICS_ENABLED=false")
+            self._disabled = True
+        elif not os.path.isdir(_ANALYTICS_DIR):
             logger.warning(
                 "TickAnalytics: directory does not exist: %s — analytics will be disabled. "
                 "Fix: add './analytics:/bot/analytics' bind mount in docker-compose.yml "
@@ -158,6 +162,9 @@ class TickAnalytics:
             self._disabled = True
         else:
             self._disabled = False
+
+        # Separate flag: in-memory recording still runs, but nothing is written to disk
+        self._save_disabled = not getattr(config, "TICK_ANALYTICS_SAVE", True)
         self._lock      = threading.Lock()
         self._pending:  Dict[str, VelocityEval] = {}   # eval_id → eval (awaiting outcome)
         self._hourly:   List[VelocityEval]       = []   # buffer for current hour
@@ -252,11 +259,13 @@ class TickAnalytics:
             self._last_hour = now.hour
 
         summary = self._aggregate(records, now, "hourly")
-        self._write_aggregate(_HOURLY_FILE, summary)
+        if not self._save_disabled:
+            self._write_aggregate(_HOURLY_FILE, summary)
         logger.info(
-            "TickAnalytics HOURLY | evals=%d passed=%d blocked=%d executed=%d",
+            "TickAnalytics HOURLY | evals=%d passed=%d blocked=%d executed=%d%s",
             summary["total_evals"], summary["passed"], summary["blocked"],
             summary["total_executed"],
+            " (save disabled)" if self._save_disabled else "",
         )
 
     def run_daily(self, now: datetime) -> None:
@@ -271,14 +280,16 @@ class TickAnalytics:
             self._last_day = now.day
 
         summary = self._aggregate(records, now, "daily")
-        self._write_aggregate(_DAILY_FILE, summary)
-        self._write_report(summary, now)
+        if not self._save_disabled:
+            self._write_aggregate(_DAILY_FILE, summary)
+            self._write_report(summary, now)
         logger.info(
             "TickAnalytics DAILY | evals=%d passed=%d blocked=%d "
-            "win_rate=%.1f%% recommendation=%s",
+            "win_rate=%.1f%% recommendation=%s%s",
             summary["total_evals"], summary["passed"], summary["blocked"],
             summary["overall_win_rate_pct"],
             summary["recommendation"]["action"],
+            " (save disabled)" if self._save_disabled else "",
         )
 
     def run_weekly(self, now: datetime) -> None:
@@ -293,13 +304,15 @@ class TickAnalytics:
             self._last_week = now.isocalendar()[1]
 
         summary = self._aggregate(records, now, "weekly")
-        self._write_aggregate(_WEEKLY_FILE, summary)
-        self._write_report(summary, now)
+        if not self._save_disabled:
+            self._write_aggregate(_WEEKLY_FILE, summary)
+            self._write_report(summary, now)
         logger.info(
-            "TickAnalytics WEEKLY | evals=%d recommendation=%s target_threshold=%.2f",
+            "TickAnalytics WEEKLY | evals=%d recommendation=%s target_threshold=%.2f%s",
             summary["total_evals"],
             summary["recommendation"]["action"],
             summary["recommendation"]["suggested_threshold"],
+            " (save disabled)" if self._save_disabled else "",
         )
 
     # ── Aggregation core ───────────────────────────────────────────────

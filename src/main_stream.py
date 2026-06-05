@@ -317,38 +317,40 @@ def run_stream() -> None:
         except Exception as exc:
             logger.warning("Dashboard failed to start: %s", exc)
 
-    # ── Tick analytics — initialise singleton early so logs start immediately ──
+    # ── Tick analytics — initialise singleton (respects TICK_ANALYTICS_ENABLED) ─
     from src.application.tick_analytics import get_analytics as _get_analytics
     _tick_analytics = _get_analytics()
+    _analytics_enabled  = getattr(config, "TICK_ANALYTICS_ENABLED",  True)
+    _analytics_schedule = getattr(config, "TICK_ANALYTICS_SCHEDULE", True)
 
     # ── Scheduler ──────────────────────────────────────────────────────
     scheduler.add_daily("cleanup", cleanup.run_all, hour=2)
     scheduler.add_weekly("market_close_wipe", cleanup.market_close_wipe, weekday=4, hour=21)
 
-    # Tick analytics periodic reports
-    # Hourly: fires at the top of every hour
-    for _hr in range(24):
+    # Tick analytics periodic reports (only registered when scheduling is enabled)
+    if _analytics_enabled and _analytics_schedule:
+        for _hr in range(24):
+            scheduler.add_daily(
+                f"tick_analytics_hourly_{_hr:02d}",
+                lambda _now=None, _a=_tick_analytics: _a.run_hourly(_now or datetime.now(tz=timezone.utc)),
+                hour=_hr,
+            )
         scheduler.add_daily(
-            f"tick_analytics_hourly_{_hr:02d}",
-            lambda _now=None, _a=_tick_analytics: _a.run_hourly(_now or datetime.now(tz=timezone.utc)),
-            hour=_hr,
+            "tick_analytics_daily",
+            lambda _now=None, _a=_tick_analytics: _a.run_daily(_now or datetime.now(tz=timezone.utc)),
+            hour=22,
         )
-    # Daily report: fires at 22:00 UTC (after NY close, before Asian open)
-    scheduler.add_daily(
-        "tick_analytics_daily",
-        lambda _now=None, _a=_tick_analytics: _a.run_daily(_now or datetime.now(tz=timezone.utc)),
-        hour=22,
-    )
-    # Weekly report: fires every Friday at 21:00 UTC (market close)
-    scheduler.add_weekly(
-        "tick_analytics_weekly",
-        lambda _now=None, _a=_tick_analytics: _a.run_weekly(_now or datetime.now(tz=timezone.utc)),
-        weekday=4,   # Friday
-        hour=21,
-    )
-
-    scheduler.start()
-    logger.info("TickAnalytics scheduled: hourly summaries + daily report (22:00 UTC) + weekly (Fri 21:00 UTC)")
+        scheduler.add_weekly(
+            "tick_analytics_weekly",
+            lambda _now=None, _a=_tick_analytics: _a.run_weekly(_now or datetime.now(tz=timezone.utc)),
+            weekday=4,
+            hour=21,
+        )
+        logger.info("TickAnalytics scheduled: hourly + daily (22:00 UTC) + weekly (Fri 21:00 UTC)")
+    elif not _analytics_enabled:
+        logger.info("TickAnalytics: disabled via TICK_ANALYTICS_ENABLED=false — no schedules registered")
+    else:
+        logger.info("TickAnalytics: scheduling disabled via TICK_ANALYTICS_SCHEDULE=false — reports must be triggered manually")
 
     last_checkpoint = clock.now()
     cp_interval     = getattr(config, "CHECKPOINT_INTERVAL_MIN", 1) * 60

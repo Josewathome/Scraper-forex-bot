@@ -295,8 +295,12 @@ TP2_RR_RATIO: float = SCALPER_TP2_RR
 # ── Entry gate strategy flag ──────────────────────────────────────
 STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "true").lower() == "true"
 
-# ── Daily drawdown limit ──────────────────────────────────────────
-DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "6.0"))
+# ── Tick Analytics ────────────────────────────────────────────────
+# Set any of these to "false" in .env to disable that subsystem.
+# All default to true so the feature is on out of the box.
+TICK_ANALYTICS_ENABLED:   bool = os.environ.get("TICK_ANALYTICS_ENABLED",   "true").lower() == "true"
+TICK_ANALYTICS_SAVE:      bool = os.environ.get("TICK_ANALYTICS_SAVE",      "true").lower() == "true"
+TICK_ANALYTICS_SCHEDULE:  bool = os.environ.get("TICK_ANALYTICS_SCHEDULE",  "true").lower() == "true"
 
 # ── EV (Expected Value) gate ──────────────────────────────────────
 # Minimum expected value in pips for a trade to be taken.
