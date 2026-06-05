@@ -420,7 +420,7 @@ else:
     text = data.decode('utf-8', errors='replace')
     enc, bom = 'utf-8', b''
 lines = text.splitlines()
-in_common = has_expert = False
+in_common = has_expert = has_dll = False
 new_lines = []
 for line in lines:
     s = line.strip()
@@ -429,14 +429,22 @@ for line in lines:
     elif s.startswith('[') and s.endswith(']'):
         if in_common and not has_expert:
             new_lines.append('ExpertAdvisors=1')
+        if in_common and not has_dll:
+            new_lines.append('AllowDll=1')
         in_common = False
     if in_common and s.startswith('ExpertAdvisors='):
         new_lines.append('ExpertAdvisors=1')
         has_expert = True
         continue
+    if in_common and s.startswith('AllowDll='):
+        new_lines.append('AllowDll=1')
+        has_dll = True
+        continue
     new_lines.append(line)
 if in_common and not has_expert:
     new_lines.append('ExpertAdvisors=1')
+if in_common and not has_dll:
+    new_lines.append('AllowDll=1')
 result = '\r\n'.join(new_lines) + '\r\n'
 open(path, 'wb').write(bom + result.encode(enc))
 print('terminal.ini: ExpertAdvisors=1 set')
@@ -768,10 +776,19 @@ fi
 # MT5 exits after its "scanning network for access points" self-restart
 # cycle and sometimes doesn't come back. This loop detects that and
 # relaunches it so ticks keep flowing to the ZMQ feed.
+#
+# WHY pgrep instead of `wine tasklist`:
+# `wine tasklist` connects to the wineserver via its Unix socket. When run
+# from a `docker exec` shell (different session than override_start.sh), it
+# creates a separate wineserver context and sees NO processes — even when
+# terminal64.exe is clearly alive in `ps aux`. This causes permanent false
+# negatives and the watchdog endlessly hammers MT5's single-instance lock.
+# `pgrep -f terminal64.exe` checks the Linux process table directly and is
+# always reliable regardless of wineserver socket state.
 (
     while true; do
         sleep 20
-        if ! WINEPREFIX=/config/.wine wine tasklist 2>/dev/null | grep -qi "terminal64"; then
+        if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
             show_message "[watchdog] MT5 not running — restarting..."
             _patch_terminal_ini
             DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
