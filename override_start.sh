@@ -716,6 +716,30 @@ PYEOF
     fi
 fi
 
+# ── BOT DATA DIRECTORIES ──────────────────────────────────────────
+# Create all directories the bot writes to before Wine Python starts.
+# Wine Python runs as a Windows process and cannot create Linux directories
+# with the right permissions — doing it here (as root in the Linux layer)
+# ensures the paths exist and are writable by UID 911 (the container user).
+#
+# These mirror the paths used in the Python source:
+#   analytics/   — tick velocity analytics (tick_analytics.py)
+#   .checkpoints/ — restart checkpoints     (checkpoint_service.py)
+#   logs/         — trading log files       (logging config)
+#
+BOT_DIR="/bot"
+for _dir in \
+    "${BOT_DIR}/analytics" \
+    "${BOT_DIR}/.checkpoints" \
+    "${BOT_DIR}/logs"
+do
+    if [ ! -d "${_dir}" ]; then
+        mkdir -p "${_dir}"
+        chmod 777 "${_dir}"
+        echo "Created bot data directory: ${_dir}"
+    fi
+done
+
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
 # Wine reports os.name == "nt" so mt5_gateway.py uses direct
