@@ -147,15 +147,21 @@ class ExecutionService:
         if trade is None:
             return None
 
-        # Margin check
-        req_margin = self._tr.get_required_margin(trade) if hasattr(self._tr, 'get_required_margin') else None
+        # ── Exact margin check using real MT5 figures ─────────────
+        req_margin  = self._tr.get_required_margin(trade) if hasattr(self._tr, 'get_required_margin') else None
         free_margin = self._tr.get_free_margin()
-        safety = getattr(config, 'MARGIN_SAFETY_FACTOR', 2.0)
+        safety      = getattr(config, 'MARGIN_SAFETY_FACTOR', 1.5)
         if req_margin is not None and free_margin is not None:
             if req_margin * safety > free_margin:
-                logger.warning("MARGIN SKIP | %s | trade needs %.2f x %.1f = %.2f but free margin is only %.2f — skipping.",
-                               symbol, req_margin, safety, req_margin * safety, free_margin)
+                logger.warning(
+                    "MARGIN SKIP | %s | required=%.2f × safety=%.1f = %.2f > free=%.2f",
+                    symbol, req_margin, safety, req_margin * safety, free_margin,
+                )
                 return None
+            logger.debug(
+                "MARGIN OK | %s | required=%.2f free=%.2f (safety=%.1fx)",
+                symbol, req_margin, free_margin, safety,
+            )
         elif req_margin is None:
             logger.debug("MARGIN CHECK unavailable for %s — proceeding (MT5 will enforce).", symbol)
 
@@ -366,17 +372,31 @@ class ExecutionService:
             self._update_streak(state.symbol, total_pips)
 
     def _update_streak(self, symbol: str, total_pips: float) -> None:
+        """
+        Track loss streak for analytics and alerting only.
+        No trading pause is enforced — strategy quality gates prevent
+        continued entries in unfavourable conditions.  LOSS_STREAK_PAUSE_HOURS
+        can be set > 0 in .env to re-enable pausing if desired.
+        """
         now = datetime.now(tz=timezone.utc)
         streak = self._loss_streak.get(symbol, 0)
         if total_pips < 0:
             streak += 1
             self._loss_streak[symbol] = streak
-            max_streak = getattr(config, 'MAX_CONSECUTIVE_LOSSES', 2)
+            max_streak = getattr(config, 'MAX_CONSECUTIVE_LOSSES', 5)
+            pause_h    = getattr(config, 'LOSS_STREAK_PAUSE_HOURS', 0)
             if streak >= max_streak:
-                pause_h = getattr(config, 'LOSS_STREAK_PAUSE_HOURS', 4)
-                self._streak_pause[symbol] = now + timedelta(hours=pause_h)
-                logger.warning("streak_pause | %s | blocked until %s",
-                               symbol, self._streak_pause[symbol].isoformat())
+                if pause_h > 0:
+                    self._streak_pause[symbol] = now + timedelta(hours=pause_h)
+                    logger.warning(
+                        "streak_pause | %s | %d consecutive losses — blocked until %s",
+                        symbol, streak, self._streak_pause[symbol].isoformat(),
+                    )
+                else:
+                    logger.warning(
+                        "streak_alert | %s | %d consecutive losses — monitoring (no pause configured)",
+                        symbol, streak,
+                    )
         else:
             self._loss_streak[symbol] = 0
             self._streak_pause[symbol] = None
