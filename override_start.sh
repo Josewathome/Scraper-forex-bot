@@ -407,6 +407,49 @@ print("EA injected into:", os.path.basename(target))
 PRELAUNCH_PYEOF
 show_message "Pre-launch chart injection done."
 
+# ── Patch terminal.ini: enable AutoTrading ────────────────────────
+# MT5 reads ExpertAdvisors=1 from [Common] in terminal.ini to allow EA
+# execution. Without it the EA is loaded but silently disabled. MT5
+# overwrites terminal.ini on exit, so we re-apply before every launch.
+_patch_terminal_ini() {
+    local _ini="${MT5_CONFIG_DIR}/terminal.ini"
+    [ -f "${_ini}" ] || return 0
+    python3 - "${_ini}" <<'_PATCH_PYEOF'
+import sys
+path = sys.argv[1]
+data = open(path, 'rb').read()
+if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+    text = data.decode('utf-16-le', errors='replace').lstrip('﻿')
+    enc, bom = 'utf-16-le', b'\xff\xfe'
+else:
+    text = data.decode('utf-8', errors='replace')
+    enc, bom = 'utf-8', b''
+lines = text.splitlines()
+in_common = has_expert = False
+new_lines = []
+for line in lines:
+    s = line.strip()
+    if s == '[Common]':
+        in_common = True
+    elif s.startswith('[') and s.endswith(']'):
+        if in_common and not has_expert:
+            new_lines.append('ExpertAdvisors=1')
+        in_common = False
+    if in_common and s.startswith('ExpertAdvisors='):
+        new_lines.append('ExpertAdvisors=1')
+        has_expert = True
+        continue
+    new_lines.append(line)
+if in_common and not has_expert:
+    new_lines.append('ExpertAdvisors=1')
+result = '\r\n'.join(new_lines) + '\r\n'
+open(path, 'wb').write(bom + result.encode(enc))
+print('terminal.ini: ExpertAdvisors=1 set')
+_PATCH_PYEOF
+}
+_patch_terminal_ini
+show_message "terminal.ini patched for AutoTrading."
+
 # ── [3/6] Launch MT5 terminal ─────────────────────────────────────
 if [ -e "$mt5file" ]; then
     show_message "[3/6] Launching MT5 terminal..."
@@ -707,6 +750,8 @@ PYEOF
         # || true: if MT5 already exited for any reason, this is harmless.
         $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
         sleep 5
+        # Re-apply ExpertAdvisors=1 before restart so AutoTrading is enabled.
+        _patch_terminal_ini
         # Relaunch MT5 in the background (same way as the initial launch above).
         $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
         show_message "MT5 restarted — waiting 20s for EA to bind ZMQ PUB socket..."
@@ -715,6 +760,24 @@ PYEOF
         show_message "EA already present in chart — MT5 restart skipped."
     fi
 fi
+
+# ── MT5 watchdog ─────────────────────────────────────────────────
+# MT5 exits after its "scanning network for access points" self-restart
+# cycle and sometimes doesn't come back. This loop detects that and
+# relaunches it so ticks keep flowing to the ZMQ feed.
+(
+    while true; do
+        sleep 20
+        if ! WINEPREFIX=/config/.wine wine tasklist 2>/dev/null | grep -qi "terminal64"; then
+            show_message "[watchdog] MT5 not running — restarting..."
+            _patch_terminal_ini
+            DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
+                $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+            sleep 30
+        fi
+    done
+) &
+show_message "MT5 watchdog started."
 
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
