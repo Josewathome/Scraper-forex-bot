@@ -542,6 +542,9 @@ EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
 EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
 EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
 AUTO_TRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
+# Record whether the compiled EA already existed before this startup run.
+# Used later to decide if MT5 needs a restart after compilation.
+[ -f "${EA_EX5}" ] && _ex5_existed=1 || _ex5_existed=0
 
 # Ensure directories exist (MT5 should have created them, but be safe)
 mkdir -p "${MT5_EXPERTS_DIR}" "${MT5_CONFIG_DIR}"
@@ -616,7 +619,10 @@ for line in data.splitlines():
         _compile_log="${MT5_EXPERTS_DIR}/ZoneBotBridge.log"
         if [ -f "${EA_EX5}" ]; then
             show_message "ZoneBotBridge.ex5 compiled successfully."
-            _ex5_compiled=1
+            # Only flag as "freshly compiled" if the .ex5 didn't exist before
+            # this run — avoids an unnecessary MT5 restart on every container
+            # restart when the binary is already present from a previous run.
+            [ "${_ex5_existed:-0}" -eq 0 ] && _ex5_compiled=1 || true
         else
             show_message "WARNING: ZoneBotBridge.ex5 not produced."
             if [ -f "${_compile_log}" ]; then
