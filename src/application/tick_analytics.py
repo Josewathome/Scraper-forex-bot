@@ -70,11 +70,22 @@ import src.config as config
 logger = logging.getLogger(__name__)
 
 # ── Directory setup ────────────────────────────────────────────────────────────
-# Anchor to /bot which is always the Docker volume mount point.
-# Relative paths resolve inside the Wine C: drive where Python has no
-# write permission.  /bot is the host directory mounted at container start.
-_BOT_DIR       = os.environ.get("BOT_DIR", "/bot")
-_ANALYTICS_DIR = os.path.join(_BOT_DIR, "analytics")
+# Wine Python maps the Docker /bot volume mount as Z:\bot (Wine's Z: drive
+# mirrors the Linux root filesystem).  Using the Z: path gives Wine Python
+# full write access.  Falls back to the BOT_DIR env var if set, or to the
+# Linux path for any non-Wine Python environment (tests, native Linux runs).
+def _resolve_analytics_dir() -> str:
+    # Explicit override always wins
+    if os.environ.get("BOT_DIR"):
+        return os.path.join(os.environ["BOT_DIR"], "analytics")
+    # Detect Wine: sys.platform is 'win32' inside Wine Python
+    import sys
+    if sys.platform == "win32":
+        return r"Z:\bot\analytics"
+    # Native Linux (e.g. running tests directly on the server)
+    return "/bot/analytics"
+
+_ANALYTICS_DIR = _resolve_analytics_dir()
 
 _RAW_FILE     = os.path.join(_ANALYTICS_DIR, "tick_velocity_raw.jsonl")
 _HOURLY_FILE  = os.path.join(_ANALYTICS_DIR, "tick_velocity_hourly.jsonl")
