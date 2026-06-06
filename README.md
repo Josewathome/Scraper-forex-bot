@@ -17,9 +17,10 @@ take-profit and dynamic stop-loss management.
 6. [Environment Variables (.env) — Complete Reference](#6-environment-variables-env--complete-reference)
 7. [Config File (src/config.py) — Complete Reference](#7-config-file-srcconfigpy--complete-reference)
 8. [Trading Strategy Explained](#8-trading-strategy-explained)
-9. [Tick Analytics & Velocity Reports](#9-tick-analytics--velocity-reports)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Upgrading & Maintenance](#11-upgrading--maintenance)
+9. [Trade Guardian — Continuous Re-Evaluation](#9-trade-guardian--continuous-re-evaluation)
+10. [Tick Analytics & Velocity Reports](#10-tick-analytics--velocity-reports)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Upgrading & Maintenance](#12-upgrading--maintenance)
 
 ---
 
@@ -598,6 +599,67 @@ at 200%, giving a 2× safety buffer above the margin call threshold.
 
 ---
 
+### Trade Guardian Thresholds
+
+The Trade Guardian re-evaluates every open trade at each M1 close and asks:
+*"If I had no position right now, would I still enter this trade?"*
+
+The answer is a **continuation score** (0.0–1.0) computed from three factors:
+- **40%** — M1 market structure still in the trade direction
+- **35%** — Fresh signal alignment (confirming vs opposing)
+- **25%** — Current P&L relative to risk (in-profit trades get holding latitude)
+
+The score falls into one of four bands:
+
+```env
+REEVAL_HOLD_THRESHOLD=0.55
+```
+Score at or above this → thesis intact, continue holding. Clears defensive mode
+if it was previously set.
+
+```env
+REEVAL_DEFENSIVE_THRESHOLD=0.40
+```
+Score between `REEVAL_DEFENSIVE_THRESHOLD` and `REEVAL_HOLD_THRESHOLD` → thesis
+is weakening. The bot enters **defensive mode**: the stop-loss is immediately
+tightened to the nearest confirmed M1 swing point (falls back to breakeven +
+1 pip if no structural swing is available within range).
+
+```env
+REEVAL_EXIT_THRESHOLD=0.25
+```
+Score between `REEVAL_EXIT_THRESHOLD` and `REEVAL_DEFENSIVE_THRESHOLD` → thesis
+degraded. If the trade is already ≥ 0.8R in profit and TP1 has not yet fired,
+the bot takes a **50% partial exit** to lock in profit before conditions
+deteriorate further.
+
+Score below `REEVAL_EXIT_THRESHOLD` → thesis invalidated. The position is closed
+immediately at market regardless of where TP or SL are placed.
+
+```env
+REEVAL_REVERSAL_CONF=0.70
+```
+If a fresh signal in the **opposite direction** has a confidence score at or
+above this value, the existing position is closed. The entry gate then evaluates
+the reversal signal as a brand-new trade on the next tick cycle. This is how
+the bot changes direction when the market reverses.
+
+```env
+TRAIL_SL_BUFFER_PIPS=1.5
+```
+When trailing the stop-loss to a structural swing point, this many pips of
+breathing room are added beyond the swing high/low. Prevents the stop from
+being placed exactly at the swing level where liquidity often rests.
+
+**How the structural SL trail works:**
+At each M1 close, if the trade is in profit, the bot checks whether there is a
+more recent confirmed swing point that is closer to current price than the
+existing SL. If yes, and if the new SL would still be at least 2 pips from
+current price, the SL is moved. This only ever tightens the stop — it never
+moves the SL against the trade and never moves it by a fixed pip distance.
+
+---
+
 ### Advanced / Rarely Changed
 
 ```env
@@ -907,7 +969,177 @@ The `LiveCandleAnalyzer` scores the forming M1 candle:
 
 ---
 
-## 9. Tick Analytics & Velocity Reports
+## 9. Trade Guardian — Continuous Re-Evaluation
+
+Once a trade is open, the bot does not simply wait for TP or SL to be hit.
+Every M1 close triggers a full re-evaluation of every open position, using
+the same market analysis pipeline as the entry system.
+
+### The core question
+
+At each M1 close, for every open trade:
+
+> *"If I had no position open right now, would I still enter this exact trade?"*
+
+If the answer is clearly yes → hold.
+If the answer is uncertain → enter defensive mode, tighten the stop.
+If the answer is no → exit before TP or SL is reached.
+
+### Continuation score
+
+The bot computes a **continuation score** (0.0–1.0) from three independent factors:
+
+| Factor | Weight | What it measures |
+|---|---|---|
+| M1 structural state | 40% | Is the market structure still in the trade direction? |
+| Fresh signal alignment | 35% | Does new analysis confirm or oppose the trade? |
+| P&L ratio | 25% | Is the trade in profit? (in-profit = benefit of the doubt) |
+
+The three factors are deliberately independent. No single factor can override
+the others — a trade must remain healthy across all three dimensions.
+
+**Structure scoring (40% factor):**
+
+| M1 State | Long trade | Short trade |
+|---|---|---|
+| BULLISH_TREND | 1.00 (fully intact) | 0.00 (structure against trade) |
+| STRUCTURE_BREAK (bullish BOS) | 0.80 | 0.10 |
+| MITIGATION_ZONE | 0.65 | 0.65 |
+| RANGING | 0.35 | 0.35 |
+| STRUCTURE_BREAK (bearish BOS) | 0.10 | 0.80 |
+| BEARISH_TREND | 0.00 (structure against trade) | 1.00 (fully intact) |
+
+**Signal scoring (35% factor):**
+- Same-direction fresh signal → `max(0.55, fresh_signal.confidence)` (confirmed)
+- No fresh signal (no setup at this bar) → 0.50 (neutral)
+- Opposing fresh signal → `max(0.0, 1.0 − conf × 1.5)` (a 0.70 confidence opposing signal scores 0.0)
+
+**P&L scoring (25% factor):**
+- At −1R: 0.25 — trade at a loss gets less benefit of the doubt
+- At 0R (breakeven): 0.40
+- At +1R: 0.55
+- At +2R: 0.70 (capped at 0.75)
+
+### Decision bands
+
+```
+Score ≥ 0.55  (HOLD_THRESHOLD)
+```
+Thesis intact. Continue holding. If defensive mode was active, it is cleared.
+
+```
+0.40 ≤ Score < 0.55  (DEFENSIVE zone)
+```
+Thesis weakening. Enter **defensive mode**:
+1. Stop-loss is moved to the nearest confirmed M1 swing low (for longs) or
+   swing high (for shorts) that is closer to price than the current SL.
+2. If no structural swing is available within range, SL moves to breakeven + 1 pip.
+3. SL is never moved further than 2 pips from current price to avoid instant trigger.
+
+```
+0.25 ≤ Score < 0.40  (PARTIAL EXIT zone)
+```
+Thesis degraded. If the trade is already ≥ 0.8R in profit and TP1 has not
+fired yet, the bot takes a **50% partial exit** to lock profit before the
+situation deteriorates further.
+
+```
+Score < 0.25  (EXIT zone)
+```
+Thesis invalidated. Position is closed at market immediately. This happens
+regardless of where TP or SL are set — the bot does not remain in a trade
+simply because those levels have not been reached.
+
+### Structural SL trail
+
+Independently of the thesis score, at each M1 close the bot checks whether the
+stop-loss can be moved to a better structural location:
+
+1. Identify all confirmed M1 swing lows (for longs) or swing highs (for shorts)
+2. For each swing point, compute `proposed_SL = swing_price − buffer_pips`
+3. Accept the proposal only when ALL are true:
+   - It is tighter than the current SL (genuine risk reduction)
+   - It is on the correct side of current price (below price for longs)
+   - It is at least 2 pips from current price (no instant trigger risk)
+4. Move to the tightest qualifying proposal
+
+The buffer (`TRAIL_SL_BUFFER_PIPS`, default 1.5) places the stop slightly
+behind the swing point rather than at the exact level where liquidity often sits.
+
+**What the trail never does:**
+- Never moves SL by a fixed pip count
+- Never uses ATR multiples
+- Never trails when the trade is at breakeven or in a loss
+- Never moves SL against the trade direction
+- Never moves SL in the absence of a fresh confirmed structural swing
+
+### Reversal detection
+
+If the entry analysis produces a fresh signal in the **opposite direction** from
+an open trade, and that signal's confidence is ≥ `REEVAL_REVERSAL_CONF`
+(default 0.70), the open trade is closed immediately.
+
+The entry gate then evaluates the reversal signal on the same tick cycle.
+If it passes all 9 entry gates, a new trade is opened in the opposite direction.
+There is no manual bias — the market determines direction at every bar.
+
+### Monitoring cadence
+
+| Method | Called when | What it does |
+|---|---|---|
+| `run_monitoring_only()` | Every tick | TP1/TP2 price-level checks, time exit, MFE tracking |
+| `run_trade_revaluation()` | Every M1 close | Structural SL trail, thesis re-evaluation, reversal |
+
+TP1 and TP2 are price-level events checked on every tick because they can be
+hit between M1 closes. The structural analysis only runs at M1 close because
+it uses bar data, not individual ticks.
+
+### Observing Trade Guardian decisions in the log
+
+```
+REEVAL [GBPUSD] ticket=12345 LONG | cont=0.72 | in_profit=True | pr=+0.85R | mfe=6.2pips | defensive=False | #7
+```
+Shows symbol, ticket, direction, continuation score, profit status, P&L ratio,
+max favourable excursion, whether defensive mode is active, and reeval count.
+
+```
+STRUCTURAL_TRAIL [GBPUSD] ticket=12345 LONG | SL 1.29900 → 1.30020 (swing-based)
+```
+SL moved to behind a confirmed M1 swing low.
+
+```
+REEVAL_DEFENSIVE [GBPUSD] ticket=12345 — cont=0.43 entering defensive mode
+DEFENSIVE_SL [GBPUSD] ticket=12345 | SL 1.30020 → 1.30045 (tightened)
+```
+Thesis weakening — defensive mode entered and SL tightened to nearest swing.
+
+```
+REVERSAL_EXIT [GBPUSD] ticket=12345 | opposing BEARISH signal conf=0.78 ≥ 0.70 — closed pips=+3.1
+```
+Strong opposing signal detected — trade closed, reversal eligible for entry.
+
+```
+REEVAL_EXIT [GBPUSD] ticket=12345 LONG — thesis invalidated (cont=0.18) | pips=-2.4 | reeval_count=12
+```
+Thesis scored below EXIT_THRESHOLD — closed before SL was hit.
+
+### Trade summary at close
+
+Every trade close (by any mechanism) logs a full summary:
+
+```
+TRADE SUMMARY | GBPUSD LONG | entry_conf=0.73 | SL=5.2pips | MFE=8.1pips | PnL=4.3pips | eff=53% | TP1=True TP2=False | reeval=14 | last_cont=0.48
+```
+
+- `entry_conf` — signal confidence at the time of entry
+- `MFE` — maximum favourable excursion (best price the trade ever reached)
+- `eff` — capture efficiency = PnL / MFE (how much of the best-case move was captured)
+- `reeval` — number of M1-close re-evaluations performed during the trade's life
+- `last_cont` — continuation score at the moment of close
+
+---
+
+## 10. Tick Analytics & Velocity Reports
 
 The tick analytics system records every signal evaluation and links it to
 the eventual trade outcome. It answers the question: "Is my velocity threshold
@@ -946,7 +1178,7 @@ button forces an immediate report without waiting for the scheduled time.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### Bot starts but no trades are placed
 
@@ -997,7 +1229,7 @@ docker compose down && docker compose up -d
 
 ---
 
-## 11. Upgrading & Maintenance
+## 12. Upgrading & Maintenance
 
 ### Update the bot
 
