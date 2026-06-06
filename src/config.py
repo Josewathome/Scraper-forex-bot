@@ -295,8 +295,12 @@ TP2_RR_RATIO: float = SCALPER_TP2_RR
 # ── Entry gate strategy flag ──────────────────────────────────────
 STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "true").lower() == "true"
 
-# ── Daily drawdown limit ──────────────────────────────────────────
-DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "6.0"))
+# ── Tick Analytics ────────────────────────────────────────────────
+# Set any of these to "false" in .env to disable that subsystem.
+# All default to true so the feature is on out of the box.
+TICK_ANALYTICS_ENABLED:   bool = os.environ.get("TICK_ANALYTICS_ENABLED",   "true").lower() == "true"
+TICK_ANALYTICS_SAVE:      bool = os.environ.get("TICK_ANALYTICS_SAVE",      "true").lower() == "true"
+TICK_ANALYTICS_SCHEDULE:  bool = os.environ.get("TICK_ANALYTICS_SCHEDULE",  "true").lower() == "true"
 
 # ── EV (Expected Value) gate ──────────────────────────────────────
 # Minimum expected value in pips for a trade to be taken.
@@ -318,3 +322,21 @@ ANTI_DUPE_SECONDS:       int   = int(os.environ.get("ANTI_DUPE_SECONDS",        
 MIN_MARGIN_LEVEL_PCT:    float = float(os.environ.get("MIN_MARGIN_LEVEL_PCT",    "200.0"))
 # How many times the required margin must be available as free margin.
 MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.5"))
+
+# ── Trade Guardian (continuous re-evaluation) ─────────────────────
+# cont_score = M1_structure*0.40 + signal_alignment*0.35 + pnl_ratio*0.25
+#
+# Score bands:
+#   >= REEVAL_HOLD_THRESHOLD      → thesis intact, hold (clear defensive mode)
+#   >= REEVAL_DEFENSIVE_THRESHOLD → weakening, enter defensive mode, tighten SL
+#   >= REEVAL_EXIT_THRESHOLD      → partial defensive exit when in significant profit
+#   <  REEVAL_EXIT_THRESHOLD      → thesis invalidated, close trade
+#
+# Reversal: opposing signal with confidence >= REEVAL_REVERSAL_CONF closes trade.
+REEVAL_HOLD_THRESHOLD:      float = float(os.environ.get("REEVAL_HOLD_THRESHOLD",      "0.55"))
+REEVAL_DEFENSIVE_THRESHOLD: float = float(os.environ.get("REEVAL_DEFENSIVE_THRESHOLD", "0.40"))
+REEVAL_EXIT_THRESHOLD:      float = float(os.environ.get("REEVAL_EXIT_THRESHOLD",      "0.25"))
+REEVAL_REVERSAL_CONF:       float = float(os.environ.get("REEVAL_REVERSAL_CONF",       "0.70"))
+
+# Buffer pips below/above swing point when computing a new structural SL.
+TRAIL_SL_BUFFER_PIPS: float = float(os.environ.get("TRAIL_SL_BUFFER_PIPS", "1.5"))

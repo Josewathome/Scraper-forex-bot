@@ -285,6 +285,11 @@ class StructureStateManager:
         tracker = self._tf.get(timeframe)
         return tracker.recent_candles(n) if tracker else []
 
+    def get_last_bos_direction(self, timeframe: Timeframe) -> Optional[Direction]:
+        """Return the direction of the most recent BOS event on this timeframe."""
+        tracker = self._tf.get(timeframe)
+        return tracker.last_bos_direction if tracker else None
+
     def get_direction(self, timeframe: Timeframe) -> Optional[Direction]:
         """Return the directional bias for this timeframe, or None if ranging."""
         state = self.get_state(timeframe)
