@@ -546,6 +546,23 @@ def _run_strategy_evaluation(
         elapsed_m1_secs=elapsed,
     )
 
+    # Re-evaluate open trades on this symbol using fresh market context.
+    # Called unconditionally — signal=None is valid input (means "no setup").
+    if entry_gate is not None:
+        _structure = getattr(strategy, "_structure", {}).get(symbol)
+        _eval_now  = now or datetime.now(tz=timezone.utc)
+        try:
+            entry_gate._exec.run_trade_revaluation(
+                symbol=symbol,
+                fresh_signal=signal,
+                structure=_structure,
+                m1_candles=m1_candles,
+                m5_candles=m5_candles,
+                now=_eval_now,
+            )
+        except Exception as exc:
+            logger.exception("Trade revaluation [%s]: %s", symbol, exc)
+
     if not signal:
         struct = strategy.structure_summary(symbol)
         logger.info(

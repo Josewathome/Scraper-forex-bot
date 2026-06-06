@@ -322,3 +322,21 @@ ANTI_DUPE_SECONDS:       int   = int(os.environ.get("ANTI_DUPE_SECONDS",        
 MIN_MARGIN_LEVEL_PCT:    float = float(os.environ.get("MIN_MARGIN_LEVEL_PCT",    "200.0"))
 # How many times the required margin must be available as free margin.
 MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.5"))
+
+# ── Trade Guardian (continuous re-evaluation) ─────────────────────
+# cont_score = M1_structure*0.40 + signal_alignment*0.35 + pnl_ratio*0.25
+#
+# Score bands:
+#   >= REEVAL_HOLD_THRESHOLD      → thesis intact, hold (clear defensive mode)
+#   >= REEVAL_DEFENSIVE_THRESHOLD → weakening, enter defensive mode, tighten SL
+#   >= REEVAL_EXIT_THRESHOLD      → partial defensive exit when in significant profit
+#   <  REEVAL_EXIT_THRESHOLD      → thesis invalidated, close trade
+#
+# Reversal: opposing signal with confidence >= REEVAL_REVERSAL_CONF closes trade.
+REEVAL_HOLD_THRESHOLD:      float = float(os.environ.get("REEVAL_HOLD_THRESHOLD",      "0.55"))
+REEVAL_DEFENSIVE_THRESHOLD: float = float(os.environ.get("REEVAL_DEFENSIVE_THRESHOLD", "0.40"))
+REEVAL_EXIT_THRESHOLD:      float = float(os.environ.get("REEVAL_EXIT_THRESHOLD",      "0.25"))
+REEVAL_REVERSAL_CONF:       float = float(os.environ.get("REEVAL_REVERSAL_CONF",       "0.70"))
+
+# Buffer pips below/above swing point when computing a new structural SL.
+TRAIL_SL_BUFFER_PIPS: float = float(os.environ.get("TRAIL_SL_BUFFER_PIPS", "1.5"))
