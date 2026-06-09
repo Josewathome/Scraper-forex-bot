@@ -330,10 +330,12 @@ fi
 # started" — the injected EA never loads. The reliable, session-independent
 # mechanism is the [StartUp] config: with Symbol set, MT5 OPENS its own chart
 # and attaches the EA on every launch regardless of profile/session state.
-STARTUP_INI_WIN='C:\Program Files\MetaTrader 5\Config\zonebot_startup.ini'
+# Config lives at drive_c root (no spaces) so the /config: argument needs no
+# awkward quoting under wine. Unix path maps to C:\zonebot_startup.ini.
+STARTUP_INI_UNIX="/config/.wine/drive_c/zonebot_startup.ini"
+STARTUP_INI_WIN='C:\zonebot_startup.ini'
 
 _write_startup_ini() {
-    mkdir -p "${MT5_CONFIG_DIR}"
     # MT5 config files use CRLF. [Experts] enables algo trading; [StartUp]
     # opens a GBPUSD H1 chart and attaches ZoneBotBridge on launch.
     {
@@ -346,7 +348,7 @@ _write_startup_ini() {
         printf 'Expert=ZoneBotBridge\r\n'
         printf 'Symbol=GBPUSD\r\n'
         printf 'Period=H1\r\n'
-    } > "${MT5_CONFIG_DIR}/zonebot_startup.ini"
+    } > "${STARTUP_INI_UNIX}"
 }
 
 # Echo the Default-profile charts dir MT5 actively uses (freshest .chr),
@@ -379,8 +381,10 @@ _empty_active_profile() {
 # MT5 is stopped first (and may empty the profile) for a clean single instance.
 _launch_mt5_with_ea() {
     _write_startup_ini
+    # The startup config MUST be passed via the /config: flag (not positionally)
+    # or MT5 ignores it. /portable and /config: coexist fine.
     DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
-        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS "${STARTUP_INI_WIN}" &
+        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS "/config:${STARTUP_INI_WIN}" &
 }
 show_message "Pre-launch: [StartUp] EA auto-load configured."
 
