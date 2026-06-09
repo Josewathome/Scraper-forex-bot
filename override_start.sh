@@ -736,36 +736,106 @@ VERIFY_PYEOF
     ) &
 fi
 
-# ── MT5 watchdog ─────────────────────────────────────────────────
-# MT5 exits after its "scanning network for access points" self-restart
-# cycle and sometimes doesn't come back. This loop detects that and
-# relaunches it so ticks keep flowing to the ZMQ feed.
+# ── MT5 auto-heal watchdog (power-loss / crash safety net) ────────
+# The graceful-shutdown trap below handles PLANNED stops (it lets MT5 save its
+# chart+EA session so the next boot restores it). But a power cut / OOM kill /
+# docker kill sends no signal — MT5 never saves, so on the next boot the profile
+# may have no charts and the EA never auto-loads (MetaQuotes docs: "if the
+# current profile has no charts, the Expert Advisor will not be started").
 #
-# WHY pgrep instead of `wine tasklist`:
-# `wine tasklist` connects to the wineserver via its Unix socket. When run
-# from a `docker exec` shell (different session than override_start.sh), it
-# creates a separate wineserver context and sees NO processes — even when
-# terminal64.exe is clearly alive in `ps aux`. This causes permanent false
-# negatives and the watchdog endlessly hammers MT5's single-instance lock.
-# `pgrep -f terminal64.exe` checks the Linux process table directly and is
-# always reliable regardless of wineserver socket state.
+# This watchdog makes the EA connection self-healing regardless of HOW MT5 last
+# died. It watches the ONE thing we actually care about: is the EA's TCP client
+# connected to our feed on port 5556? We read that straight from the kernel via
+# /proc/net/tcp (no `ss`/`netstat` dependency, no log parsing):
+#   ESTAB  → an EA is connected      → healthy, do nothing
+#   LISTEN → bot listening, no EA yet → start counting; if it persists, kick MT5
+#   NONE   → bot not listening yet    → still starting up, never kick
+# Force-kill + re-inject + relaunch repeats until the EA connects. It only ever
+# acts at startup or after a failure — once connected it sits idle, so there is
+# ZERO per-tick latency on the live feed.
+#
+# WHY /proc/net/tcp and pgrep (not `wine tasklist`): wine tasklist opens its own
+# wineserver context and sees no processes; the kernel process/socket tables are
+# always authoritative regardless of wineserver state.
+_FEED_PORT=5556
+_feed_state() {
+    _FEED_PORT="${_FEED_PORT}" python3 - <<'PYEOF'
+import os
+port = int(os.environ.get("_FEED_PORT", "5556"))
+hexport = format(port, "04X")
+listen = estab = False
+for f in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        for line in open(f).read().splitlines()[1:]:
+            p = line.split()
+            if len(p) < 4:
+                continue
+            if p[1].rsplit(":", 1)[-1] != hexport:
+                continue
+            if p[3] == "0A":      # TCP_LISTEN
+                listen = True
+            elif p[3] == "01":    # TCP_ESTABLISHED
+                estab = True
+    except Exception:
+        pass
+print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
+PYEOF
+}
+
+_relaunch_mt5() {
+    # MT5 is being (re)started — re-inject the EA (idempotent) and patch
+    # AutoTrading flags so the profile MT5 reopens carries the EA.
+    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
+    _patch_terminal_ini
+    DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
+        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+}
+
+_WATCHDOG_INTERVAL=20
+_HEAL_AFTER_SECS=90          # bot listening but no EA for this long → kick MT5
 (
+    _no_feed=0
     while true; do
-        sleep 20
+        sleep ${_WATCHDOG_INTERVAL}
+
+        # 1) MT5 process gone entirely → relaunch immediately.
         if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
             show_message "[watchdog] MT5 not running — re-injecting EA and relaunching..."
-            # MT5 is dead, so editing its .chr files is safe. Re-inject (idempotent
-            # — exits 2 if already correct) so the EA re-attaches when MT5 reopens
-            # its profile charts, then launch normally. Do NOT empty the profile.
-            SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
-            _patch_terminal_ini
-            DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
-                $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+            _relaunch_mt5
+            _no_feed=0
             sleep 30
+            continue
         fi
+
+        # 2) MT5 is up — is the EA actually connected to our feed?
+        case "$(_feed_state)" in
+            ESTAB)
+                _no_feed=0            # healthy — EA streaming ticks
+                ;;
+            LISTEN)
+                # Bot is listening but the EA hasn't connected. Give it time
+                # (MT5 cold-start + chart load), then heal if it never shows.
+                _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
+                if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
+                    show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — force-restarting MT5 to reload the EA..."
+                    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+                        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+                    sleep 5
+                    _relaunch_mt5
+                    _no_feed=0
+                    sleep 45      # let MT5 reconnect to broker + load EA before re-checking
+                fi
+                ;;
+            *)
+                # NONE — bot's TcpFeed not listening yet (still starting). Never
+                # kick MT5 during this window; just wait for the feed to come up.
+                _no_feed=0
+                ;;
+        esac
     done
 ) &
-show_message "MT5 watchdog started."
+_watchdog_pid=$!
+show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
@@ -802,11 +872,45 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
 fi
 
+# ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
+# THE persistence fix. `docker compose down` sends SIGTERM and the container is
+# killed seconds later — if MT5 is hard-killed it does NOT save its session, so
+# on the next boot it may open with no chart and the EA never auto-loads (even
+# though chart01.chr holds it on disk). That is exactly the intermittent
+# "have to drag the EA again" symptom.
+#
+# Here we trap SIGTERM/SIGINT and close MT5 *cleanly* (taskkill WITHOUT /F = a
+# normal window close). A clean close makes MT5 persist its open chart and the
+# expert attached to it, so on the next start MT5 restores the EA itself — no
+# manual drag, deterministically. We stop the watchdog first so it can't
+# relaunch MT5 mid-shutdown.
+_graceful_shutdown() {
+    show_message "Container stopping — closing MT5 cleanly so it saves the chart+EA session..."
+    # Stop the watchdog so it doesn't relaunch MT5 while we're closing it.
+    [ -n "${_watchdog_pid:-}" ] && kill "${_watchdog_pid}" 2>/dev/null || true
+    # Clean close (NO /F): lets MT5 write its profile/lastsession with the EA.
+    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+        $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
+    # Give MT5 time to flush the session to disk before the container dies.
+    sleep 8
+    # Tell the bot to stop (its own SIGTERM handler flushes a checkpoint).
+    [ -n "${_bot_pid:-}" ] && kill "${_bot_pid}" 2>/dev/null || true
+    wait "${_bot_pid:-}" 2>/dev/null || true
+    show_message "Clean shutdown complete — EA session saved for next start."
+    exit 0
+}
+trap _graceful_shutdown SIGTERM SIGINT
+
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
 # Wine reports os.name == "nt" so mt5_gateway.py uses direct
 # MetaTrader5 import — no RPyC bridge.
 # PYTHONUTF8=1 forces UTF-8 to prevent cp1252 crashes on box-drawing chars.
+# Run in BACKGROUND + wait so the trap above can fire on container stop
+# (a foreground command would swallow the signal until it returns).
 echo "Starting ZoneBot (stream mode) in Wine Python..."
 cd /bot && DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-    $wine_executable python -m src.main_stream
+    $wine_executable python -m src.main_stream &
+_bot_pid=$!
+# `wait` returns when the bot exits OR when a trapped signal fires.
+wait "${_bot_pid}"
