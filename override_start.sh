@@ -475,6 +475,20 @@ else
 fi
 
 # ── [3/6] Launch MT5 terminal ─────────────────────────────────────
+# Record a baseline of "terminal synchronized" occurrences in the persistent
+# daily journal BEFORE launching, so the sync-wait before the bot only accepts
+# a NEW sync from THIS launch (the daily log carries stale entries from earlier
+# container runs the same day, which would otherwise pass instantly).
+MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
+_sync_baseline=$(python3 -c "
+import glob,os
+ls=sorted(glob.glob('${MT5_LOG_DIR}/*.log'),key=os.path.getmtime)
+n=0
+for l in ls:
+    n+=open(l,'rb').read().decode('utf-16-le','replace').lower().count('terminal synchronized')
+print(n)
+" 2>/dev/null || echo 0)
+
 if [ -e "$mt5file" ]; then
     show_message "[3/6] Launching MT5 terminal..."
     $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
@@ -766,6 +780,38 @@ fi
     done
 ) &
 show_message "MT5 watchdog started."
+
+# ── Wait for MT5 to be IPC-ready before starting the bot ──────────
+# The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
+# empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
+# has finished its Wine cold-start and broker handshake — until then
+# initialize() returns (-10005, IPC timeout). The old script implicitly waited
+# here because it alway recompiled (which polls for "terminal synchronized"
+# before compiling). Now that recompiles are skipped on normal restarts, we
+# must wait explicitly, or the bot burns its retry budget before MT5 is up.
+_sync_wait=0
+_sync_timeout=240
+show_message "Waiting for MT5 to synchronize before starting bot (up to ${_sync_timeout}s)..."
+while [ ${_sync_wait} -lt ${_sync_timeout} ]; do
+    # Accept only a NEW "terminal synchronized" (count beyond the pre-launch
+    # baseline) so a stale same-day journal entry can't pass us instantly.
+    if _sync_baseline="${_sync_baseline}" python3 -c "
+import glob,os,sys
+ls=sorted(glob.glob('${MT5_LOG_DIR}/*.log'),key=os.path.getmtime)
+n=0
+for l in ls:
+    n+=open(l,'rb').read().decode('utf-16-le','replace').lower().count('terminal synchronized')
+sys.exit(0 if n > int(os.environ.get('_sync_baseline','0')) else 1)
+" 2>/dev/null; then
+        show_message "MT5 synchronized — starting bot."
+        break
+    fi
+    sleep 5
+    _sync_wait=$((_sync_wait + 5))
+done
+if [ ${_sync_wait} -ge ${_sync_timeout} ]; then
+    show_message "MT5 sync wait timed out — starting bot anyway (it will retry mt5.initialize)."
+fi
 
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
