@@ -130,16 +130,42 @@ def pick_target(charts, chr_dir):
     return new_path, True
 
 
+def desired_order_wnd(target_basename):
+    """The order.wnd that makes MT5 open exactly our one chart on startup.
+
+    order.wnd is a UTF-16-LE (BOM-prefixed) file listing the chart files to
+    open, one 'chartNN.chr\\r\\n' per line (decoded from a real MT5 profile).
+    MT5 opens the charts listed HERE — NOT whatever .chr files happen to be on
+    disk. The Default profile on this image ships WITHOUT an order.wnd, so MT5
+    opens zero charts and the injected EA never loads. Writing this file is the
+    fix: list our single chart so MT5 opens it (and loads the EA) on launch.
+    """
+    return b"\xff\xfe" + (target_basename + "\r\n").encode("utf-16-le")
+
+
 def main():
     chr_dir = resolve_charts_dir()
     charts = {p: read_text(p) for p in sorted(glob.glob(os.path.join(chr_dir, "*.chr")))}
 
     target, created = pick_target(charts, chr_dir)
+    target_base = os.path.basename(target)
 
-    # Already ideal? Exactly one instance, on the target, nowhere else.
+    order_path = os.path.join(chr_dir, "order.wnd")
+    want_order = desired_order_wnd(target_base)
+    have_order = b""
+    if os.path.exists(order_path):
+        try:
+            have_order = open(order_path, "rb").read()
+        except Exception:
+            have_order = b""
+    order_ok = (have_order == want_order)
+
+    # Already ideal? Exactly one EA instance on the target, nowhere else, AND
+    # order.wnd already tells MT5 to open exactly that chart.
     others_have = any(has_ea(t) for p, t in charts.items() if p != target)
-    if not created and has_ea(charts[target]) and not others_have:
-        print("inject_ea_chart: EA already correct in", os.path.relpath(target, MT5_DIR))
+    if not created and has_ea(charts[target]) and not others_have and order_ok:
+        print("inject_ea_chart: EA + order.wnd already correct in",
+              os.path.relpath(target, MT5_DIR))
         sys.exit(2)
 
     # Normalize: strip ZoneBotBridge from every chart so only one remains.
@@ -153,12 +179,20 @@ def main():
 
     # Inject the single instance into the target chart.
     text = charts[target]
-    if "</chart>" in text:
+    if has_ea(text):
+        pass  # already present (we may only be fixing order.wnd)
+    elif "</chart>" in text:
         text = text.replace("</chart>", EXPERT_BLOCK + "</chart>", 1)
     else:
         text = text.rstrip() + EXPERT_BLOCK + "\n</chart>\n"
     write_chart(target, text)
+
+    # Write order.wnd so MT5 actually OPENS this chart on startup. Without this,
+    # MT5 opens no chart and the EA never loads (the whole persistence problem).
+    open(order_path, "wb").write(want_order)
+
     print("inject_ea_chart: EA attached to", os.path.relpath(target, MT5_DIR),
+          "+ order.wnd ->", target_base,
           "(created new chart)" if created else "")
     sys.exit(0)
 
