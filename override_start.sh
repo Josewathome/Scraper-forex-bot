@@ -326,71 +326,12 @@ fi
 # This runs BEFORE MT5 starts so the .chr file is ready when MT5
 # loads its profile. MT5 reads chart files at startup and will
 # attach ZoneBotBridge automatically — no VNC or AutoTrade.ini needed.
+#
+# inject_ea_chart.py resolves the ACTIVE profile dir at runtime
+# (MQL5/Profiles/Charts/Default on this image, NOT Profiles/Charts/Default)
+# and enforces a single EA instance on the GBPUSD H1 chart.
 _symbols_pre="${SYMBOLS_CSV:-GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF}"
-_chr_dir_pre="${MT5_INSTALL_DIR}/Profiles/Charts/Default"
-mkdir -p "${_chr_dir_pre}"
-SYMBOLS_CSV="${_symbols_pre}" python3 - <<'PRELAUNCH_PYEOF'
-import os, sys, glob
-
-mt5_dir  = "/config/.wine/drive_c/Program Files/MetaTrader 5"
-chr_dir  = os.path.join(mt5_dir, "Profiles", "Charts", "Default")
-symbols  = os.environ.get("SYMBOLS_CSV", "GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF")
-ea_name  = "ZoneBotBridge"
-endpoint = "tcp://127.0.0.1:5556"
-
-EXPERT_BLOCK = "\n<expert>\nname={ea}\nflags=3\nwindow=0\n\n<inputs>\nPUB_ENDPOINT={ep}\nSYMBOLS_CSV={sym}\nHEARTBEAT_SECS=5\n</inputs>\n\n</expert>\n".format(
-    ea=ea_name, ep=endpoint, sym=symbols)
-
-os.makedirs(chr_dir, exist_ok=True)
-chrs = sorted(glob.glob(os.path.join(chr_dir, "*.chr")))
-
-# Find GBPUSD H1 chart (period_type=2 period_size=1 in MT5 = H1)
-target = None
-for path in chrs:
-    try:
-        raw  = open(path, "rb").read()
-        text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-        if "symbol=GBPUSD" in text and "period_type=2" in text and "period_size=1" in text:
-            target = path
-            break
-    except Exception:
-        pass
-
-# Fallback: any GBPUSD chart
-if target is None:
-    for path in chrs:
-        try:
-            raw  = open(path, "rb").read()
-            text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-            if "symbol=GBPUSD" in text:
-                target = path
-                break
-        except Exception:
-            pass
-
-# Still nothing — create a minimal GBPUSD H1 chart
-if target is None:
-    idx = len(chrs) + 1
-    target = os.path.join(chr_dir, "chart{:02d}.chr".format(idx))
-    minimal = "<chart>\nsymbol=GBPUSD\nperiod_type=2\nperiod_size=1\ndigits=5\ntick_size=0.000000\nscale=4\nmode=1\nbidline=1\n\n<window>\nheight=100\n\n<indicator>\nname=Main\npath=\napply=1\nshow_data=1\nscale_inherit=0\nscale_line=0\nscale_line_percent=50\nscale_line_value=0.000000\nscale_fix_min=0\nscale_fix_min_val=0.000000\nscale_fix_max=0\nscale_fix_max_val=0.000000\n</indicator>\n\n</window>\n\n</chart>\n"
-    open(target, "wb").write(b"\xff\xfe" + minimal.encode("utf-16-le"))
-    print("Created new GBPUSD H1 chart:", target)
-
-raw  = open(target, "rb").read()
-text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-
-if ea_name in text:
-    print("EA already injected in:", os.path.basename(target))
-    sys.exit(0)
-
-if "</chart>" in text:
-    text = text.replace("</chart>", EXPERT_BLOCK + "</chart>", 1)
-else:
-    text = text.rstrip() + EXPERT_BLOCK + "\n</chart>\n"
-
-open(target, "wb").write(b"\xff\xfe" + text.encode("utf-16-le"))
-print("EA injected into:", os.path.basename(target))
-PRELAUNCH_PYEOF
+SYMBOLS_CSV="${_symbols_pre}" python3 /bot/tools/inject_ea_chart.py || true
 show_message "Pre-launch chart injection done."
 
 # ── Patch terminal.ini: enable AutoTrading ────────────────────────
@@ -681,84 +622,13 @@ fi
 # Profile search order: Profiles/Charts/Default/  (the active profile)
 if [ -f "${EA_EX5}" ]; then
     _symbols="${SYMBOLS_CSV:-GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF}"
-    _chr_dir="${MT5_INSTALL_DIR}/Profiles/Charts/Default"
-    mkdir -p "${_chr_dir}"
 
-    # Pass _symbols into the Python heredoc via the environment.
-    # The pre-launch block used SYMBOLS_CSV=... prefix; we do the same here so
-    # both injection passes use the same symbol list from the .env file.
+    # inject_ea_chart.py resolves the active profile dir, removes any stray
+    # EA instances, and attaches a single ZoneBotBridge to the GBPUSD H1 chart.
+    #   exit 0 = chart modified  → MT5 restart required
+    #   exit 2 = already correct → no restart needed
     _chart_inject_result=0
-    SYMBOLS_CSV="${_symbols}" python3 - <<'PYEOF'
-import os, sys, glob
-
-mt5_dir  = "/config/.wine/drive_c/Program Files/MetaTrader 5"
-chr_dir  = os.path.join(mt5_dir, "Profiles", "Charts", "Default")
-symbols  = os.environ.get("SYMBOLS_CSV", "GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF")
-ea_name  = "ZoneBotBridge"
-endpoint = "tcp://127.0.0.1:5556"
-
-# The <expert> XML block MT5 uses to persist an attached EA.
-# period_type=2 period_size=1 → H1 (type 2 = hours, size 1)
-EXPERT_BLOCK = """\n<expert>\nname={ea}\nflags=3\nwindow=0\n\n<inputs>\nPUB_ENDPOINT={ep}\nSYMBOLS_CSV={sym}\nHEARTBEAT_SECS=5\n</inputs>\n\n</expert>\n""".format(
-    ea=ea_name, ep=endpoint, sym=symbols)
-
-os.makedirs(chr_dir, exist_ok=True)
-chrs = sorted(glob.glob(os.path.join(chr_dir, "*.chr")))
-
-# Find existing GBPUSD H1 chart or pick a GBPUSD chart
-target = None
-for path in chrs:
-    try:
-        raw  = open(path, "rb").read()
-        text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-        if "symbol=GBPUSD" in text and "period_type=2" in text and "period_size=1" in text:
-            target = path
-            break
-    except Exception:
-        pass
-
-# Fallback: any GBPUSD chart
-if target is None:
-    for path in chrs:
-        try:
-            raw  = open(path, "rb").read()
-            text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-            if "symbol=GBPUSD" in text:
-                target = path
-                break
-        except Exception:
-            pass
-
-# Still nothing — create a minimal GBPUSD H1 chart
-if target is None:
-    idx = len(chrs) + 1
-    target = os.path.join(chr_dir, "chart{:02d}.chr".format(idx))
-    minimal = "<chart>\nsymbol=GBPUSD\nperiod_type=2\nperiod_size=1\ndigits=5\ntick_size=0.000000\nscale=4\nmode=1\nbidline=1\n\n<window>\nheight=100\n\n<indicator>\nname=Main\npath=\napply=1\nshow_data=1\nscale_inherit=0\nscale_line=0\nscale_line_percent=50\nscale_line_value=0.000000\nscale_fix_min=0\nscale_fix_min_val=0.000000\nscale_fix_max=0\nscale_fix_max_val=0.000000\n</indicator>\n\n</window>\n\n</chart>\n"
-    open(target, "wb").write(b"\xff\xfe" + minimal.encode("utf-16-le"))
-    print("Created new GBPUSD H1 chart:", target)
-
-# Read, check, patch
-raw  = open(target, "rb").read()
-text = raw.decode("utf-16-le", errors="replace").lstrip("﻿")
-
-if ea_name in text:
-    print("EA already in chart file:", target)
-    # Exit 2 = already present, no restart needed
-    sys.exit(2)
-
-# Insert <expert> block before </chart>
-if "</chart>" in text:
-    text = text.replace("</chart>", EXPERT_BLOCK + "</chart>", 1)
-else:
-    text = text.rstrip() + EXPERT_BLOCK + "\n</chart>\n"
-
-# Write UTF-16-LE with BOM.  Prepend the BOM character as the first code-unit
-# so the file starts with the two-byte sequence FF FE.
-open(target, "wb").write(b"\xff\xfe" + text.encode("utf-16-le"))
-print("EA injected into chart file:", target)
-# Exit 0 = freshly injected, MT5 restart required
-sys.exit(0)
-PYEOF
+    SYMBOLS_CSV="${_symbols}" python3 /bot/tools/inject_ea_chart.py
     _chart_inject_result=$?
     show_message "EA chart injection complete (exit=${_chart_inject_result})."
 
