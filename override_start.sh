@@ -835,9 +835,12 @@ _snapshot_good_profile() {
 
 _WATCHDOG_INTERVAL=20
 _HEAL_AFTER_SECS=90          # bot listening but no EA for this long → kick MT5
+_MAX_HEALS=3                 # after this many failed kicks, STOP thrashing MT5
 (
     _no_feed=0
     _snapshotted=0
+    _heals=0
+    _gaveup=0
     while true; do
         sleep ${_WATCHDOG_INTERVAL}
 
@@ -854,9 +857,12 @@ _HEAL_AFTER_SECS=90          # bot listening but no EA for this long → kick MT
         case "$(_feed_state)" in
             ESTAB)
                 _no_feed=0            # healthy — EA streaming ticks
+                _heals=0             # connection is good → re-arm healing
+                _gaveup=0
                 # Capture the working profile ONCE per session (after a short
                 # settle so MT5 has flushed order.wnd with chart01 open). Next
-                # boot restores it → EA loads on the first launch.
+                # boot restores it → EA loads on the first launch. This is also
+                # how a one-time manual drag gets persisted automatically.
                 if [ ${_snapshotted} -eq 0 ]; then
                     sleep 10
                     _snapshot_good_profile
@@ -864,17 +870,36 @@ _HEAL_AFTER_SECS=90          # bot listening but no EA for this long → kick MT
                 fi
                 ;;
             LISTEN)
-                # Bot is listening but the EA hasn't connected. Give it time
-                # (MT5 cold-start + chart load), then heal if it never shows.
+                # Bot is listening but the EA hasn't connected.
+                if [ ${_gaveup} -eq 1 ]; then
+                    # Already exhausted auto-load attempts — do NOT thrash MT5.
+                    # Wait quietly for a one-time manual attach (which we'll snapshot).
+                    continue
+                fi
                 _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
                 if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
-                    show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — force-restarting MT5 to reload the EA..."
-                    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-                        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
-                    sleep 5
-                    _relaunch_mt5
-                    _no_feed=0
-                    sleep 45      # let MT5 reconnect to broker + load EA before re-checking
+                    if [ ${_heals} -lt ${_MAX_HEALS} ]; then
+                        _heals=$((_heals + 1))
+                        show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — force-restarting MT5 (attempt ${_heals}/${_MAX_HEALS})..."
+                        pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+                            $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+                        sleep 5
+                        _relaunch_mt5
+                        _no_feed=0
+                        sleep 45      # let MT5 reconnect + load EA before re-checking
+                    else
+                        _gaveup=1
+                        show_message "════════════════════════════════════════════════════════════"
+                        show_message "[watchdog] MT5 did NOT auto-load the EA after ${_MAX_HEALS} restarts."
+                        show_message "  This MT5/Wine build won't restore the EA on its own. ONE-TIME fix:"
+                        show_message "    1. Open VNC: http://localhost:3001"
+                        show_message "    2. Drag 'ZoneBotBridge' from Navigator onto the GBPUSD,H1 chart"
+                        show_message "       (Allow Algo Trading when prompted)."
+                        show_message "  It will connect, and this script auto-snapshots the working profile"
+                        show_message "  (chart + order.wnd) so it loads by itself on every future start."
+                        show_message "  No more thrashing — waiting quietly for the EA to connect."
+                        show_message "════════════════════════════════════════════════════════════"
+                    fi
                 fi
                 ;;
             *)
