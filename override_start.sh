@@ -94,26 +94,10 @@ else
     show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
 fi
 
-# ── [0/6] Restore known-good chart profile (EA loads on the FIRST launch) ──
-# MT5 decides which charts to OPEN on startup from the binary `order.wnd` file in
-# the active profile dir — NOT from the mere presence of .chr files (MetaQuotes
-# "Files and Folders" docs: order.wnd holds "the windows placement order"). Our
-# inject_ea_chart.py writes chart01.chr but cannot synthesize order.wnd, so on a
-# cold boot MT5 often opens ZERO charts and the EA never auto-loads (it only loads
-# after the watchdog force-restart). The watchdog below snapshots a HEALTHY profile
-# (chart01.chr + a matching order.wnd) once the EA is connected; restoring that
-# snapshot here makes MT5 reopen chart01 WITH the EA on the very first launch —
-# deterministic, no 2-minute kick, no manual drag.
-_ACTIVE_PROFILE_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Profiles/Charts/Default"
-_GOOD_PROFILE_SNAPSHOT="/config/good_profile"
-if [ -f "${_GOOD_PROFILE_SNAPSHOT}/order.wnd" ]; then
-    mkdir -p "${_ACTIVE_PROFILE_DIR}"
-    cp -f "${_GOOD_PROFILE_SNAPSHOT}/"*.chr      "${_ACTIVE_PROFILE_DIR}/" 2>/dev/null || true
-    cp -f "${_GOOD_PROFILE_SNAPSHOT}/order.wnd"  "${_ACTIVE_PROFILE_DIR}/" 2>/dev/null || true
-    show_message "[0/6] Restored known-good chart profile (order.wnd + charts) — EA should load on first launch."
-else
-    show_message "[0/6] No known-good profile snapshot yet — watchdog will capture one once the EA connects."
-fi
+# EA auto-start on this build is handled by the [StartUp] /config: mechanism
+# (see _launch_mt5 below): MT5 opens its own chart and live-attaches the EA on
+# every launch — no reliance on MT5 persisting profile/.chr/order.wnd to disk
+# (which this Wine build does not do).
 
 # ── [0/6] Pin Wine MachineGuid ────────────────────────────────────
 # IC Markets treats each unique MachineGuid as a new device and triggers
@@ -470,35 +454,76 @@ _PATCH_PYEOF
 _patch_terminal_ini
 show_message "terminal.ini patched for AutoTrading."
 
-# ── Decide whether the EA needs recompiling — BEFORE the launch ───
-# The old script deleted + recompiled the .ex5 on EVERY boot, which forced a
-# compile-then-force-kill-then-relaunch cycle every single time. That restart
-# disrupts MT5 right as the Python bot calls mt5.initialize(), producing the
-# repeating "(-10005, IPC timeout) Terminal not running" loop: MT5 is mid
-# broker-resync and not yet IPC-ready.
+# ── EA auto-start via the [StartUp] /config: mechanism ────────────
+# This build of MT5 does NOT persist chart/profile state to disk, so it can
+# never *restore* an EA from a saved chart on launch — only a live attach runs
+# it. The [StartUp] config is exactly that: on every launch MT5 OPENS its own
+# chart (per Symbol/Period) and does a fresh LIVE attach of the Expert — the
+# same code path as a manual drag, which we know works here. It needs no disk
+# persistence. (Official MetaQuotes headless method.)
 #
-# New rule: only recompile when the EA source actually changed (or no .ex5
-# exists). When the .ex5 is already current, inject the EA into the chart NOW —
-# before the single MT5 launch — so MT5 loads it on startup with NO restart.
+# The config lives at drive_c root (no spaces) so the /config: argument needs
+# no awkward quoting under Wine. C:\ maps to /config/.wine/drive_c.
+STARTUP_INI_UNIX="/config/.wine/drive_c/zonebot_startup.ini"
+STARTUP_INI_WIN='C:\zonebot_startup.ini'
+
+_write_startup_ini() {
+    # [Experts] turns the global AutoTrading button ON; [StartUp] opens a
+    # GBPUSD H1 chart and attaches ZoneBotBridge with its (correct) default
+    # inputs. CRLF line endings as MT5 expects.
+    {
+        printf '[Experts]\r\n'
+        printf 'AllowLiveTrading=true\r\n'
+        printf 'Enabled=true\r\n'
+        printf 'Account=false\r\n'
+        printf 'Profile=false\r\n'
+        printf '[StartUp]\r\n'
+        printf 'Expert=ZoneBotBridge\r\n'
+        printf 'Symbol=GBPUSD\r\n'
+        printf 'Period=H1\r\n'
+    } > "${STARTUP_INI_UNIX}"
+}
+
+# Remove any saved charts from the active Default profile so MT5 opens ONLY the
+# chart [StartUp] creates — guarantees exactly one EA instance (the bot's TCP
+# feed is single-client). Safe to call only when MT5 is stopped.
+_empty_default_profile() {
+    rm -f "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Profiles/Charts/Default/"*.chr \
+          "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Profiles/Charts/Default/order.wnd" \
+          2>/dev/null || true
+}
+
+# Launch MT5 so it auto-attaches the EA via [StartUp]. Direct `wine <exe>`
+# (NOT `start /unix`) so the /config: argument reaches terminal64.exe intact.
+_launch_mt5() {
+    _write_startup_ini
+    _patch_terminal_ini
+    _empty_default_profile
+    DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
+        $wine_executable "$mt5file" $MT5_CMD_OPTIONS "/config:${STARTUP_INI_WIN}" &
+}
+
+# ── Decide whether the EA needs recompiling — BEFORE the launch ───
+# Only recompile when the EA source actually changed (or no .ex5 exists), so we
+# don't force a disruptive restart on every boot.
 EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
 EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
 EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
 _recompile_needed=0
 if [ ! -f "${EA_EX5}" ]; then
     _recompile_needed=1
-    show_message "EA: no compiled .ex5 yet — will compile, then restart MT5 once."
+    show_message "EA: no compiled .ex5 yet — will compile, then relaunch with [StartUp]."
 elif [ "${EA_SRC}" -nt "${EA_EX5}" ]; then
     _recompile_needed=1
-    show_message "EA: source newer than .ex5 — will recompile, then restart MT5 once."
+    show_message "EA: source newer than .ex5 — will recompile, then relaunch with [StartUp]."
 else
-    show_message "EA: .ex5 up to date — injecting into chart before launch (no restart)."
-    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
+    show_message "EA: .ex5 up to date — will auto-attach via [StartUp] on launch."
 fi
 
-# ── [3/6] Launch MT5 terminal ─────────────────────────────────────
+# ── [3/6] Launch MT5 terminal (with [StartUp] EA auto-attach) ─────
 if [ -e "$mt5file" ]; then
-    show_message "[3/6] Launching MT5 terminal..."
-    $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+    show_message "[3/6] Launching MT5 terminal with [StartUp] EA auto-attach..."
+    _launch_mt5
     show_message "[3/6] MT5 launched (PID $!)."
 else
     show_message "[3/6] ERROR: MT5 binary not found — cannot continue."
@@ -689,72 +714,18 @@ else
     show_message "WARNING: EA source not found at ${EA_SRC}"
 fi
 
-# ── Relaunch MT5 with the EA injected into its active chart profile ──
-# MT5 was first launched (above) before the .ex5 existed, so it has no EA.
-# Now that ZoneBotBridge.ex5 is compiled, stop MT5, inject the EA into the
-# .chr file of the profile MT5 actually loads, and relaunch normally.
-#
-# WHY injection and NOT [StartUp]: the /config:[StartUp] mechanism does not
-# work under this Wine build (MT5 ignores the directive — "NOT loaded within
-# 75s" every time). The .chr-injection approach IS proven to work here: MT5
-# reopens the charts present in its active profile directory on launch, and a
-# chart carrying the <expert> block loads the EA. We do NOT empty the profile
-# (that removed the very charts MT5 reopens, which is why [StartUp] left us
-# with zero EA). inject_ea_chart.py enforces exactly ONE instance.
-#
-# This restart ONLY runs when we just (re)compiled — i.e. the EA wasn't loaded
-# at the initial launch because the .ex5 didn't exist yet. On a normal restart
-# the .ex5 was current, we pre-injected before launch, and MT5 already has the
-# EA — so we skip this disruptive cycle and avoid the IPC-timeout window.
+# ── Relaunch MT5 with [StartUp] after a fresh compile ────────────
+# MT5 was first launched (above) before the .ex5 existed, so [StartUp] had no
+# expert to attach. Now that ZoneBotBridge.ex5 is compiled, stop MT5 and
+# relaunch it with the [StartUp] config so it opens its chart and attaches the
+# freshly compiled EA. Only runs when we actually (re)compiled this boot.
 if [ "${_recompile_needed}" -eq 1 ] && [ -f "${EA_EX5}" ]; then
-    # Count existing EA loads so the verify poll below only accepts a NEW one
-    # (the persistent journal carries stale "loaded successfully" lines).
-    _ea_loads_before=$(python3 -c "
-import glob,os
-ls=sorted(glob.glob('/config/.wine/drive_c/Program Files/MetaTrader 5/logs/*.log'),key=os.path.getmtime)
-n=0
-for l in ls:
-    n+=open(l,'rb').read().decode('utf-16-le','replace').count('ZoneBotBridge')
-print(n)
-" 2>/dev/null || echo 0)
-
-    show_message "Stopping MT5 to inject EA into its active chart profile..."
+    show_message "Stopping MT5 to relaunch with [StartUp] (freshly compiled EA)..."
     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
         $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
     sleep 5
-    # Inject the EA into the profile MT5 reloads (single instance enforced).
-    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
-    _patch_terminal_ini
-    # Launch MT5 normally — it reopens its profile charts (now carrying the EA).
-    DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
-        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
-    show_message "MT5 relaunched with injected EA — verifying EA load in background (bot starts now)."
-    # Verify a NEW EA load appeared (count increased) — not a stale journal line.
-    # Run in BACKGROUND so the bot starts immediately; after a force-kill MT5 must
-    # reconnect to the broker and re-synchronize before it opens charts and loads
-    # the EA, which routinely takes 1-2 min — longer than any reasonable inline
-    # wait. The bot's TcpFeed listens independently, so blocking here is pointless.
-    (
-        _ea_loads_before="${_ea_loads_before}" python3 - <<'VERIFY_PYEOF'
-import glob, os, time
-logdir = "/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
-before = int(os.environ.get("_ea_loads_before", "0"))
-deadline, hit = time.time() + 180, None
-while time.time() < deadline and not hit:
-    loads = []
-    for l in sorted(glob.glob(os.path.join(logdir, "*.log")), key=os.path.getmtime):
-        data = open(l, "rb").read().decode("utf-16-le", errors="replace")
-        loads += [ln.strip() for ln in data.splitlines()
-                  if "ZoneBotBridge" in ln and "loaded successfully" in ln]
-    if len(loads) > before:
-        hit = loads[-1]
-    else:
-        time.sleep(5)
-print("[ea-verify]", "EA loaded:", hit) if hit else print(
-    "[ea-verify] EA not seen in journal after 180s. The EA still loads once MT5 "
-    "finishes broker sync — confirm via 'TcpFeed: EA connected' in the bot log.")
-VERIFY_PYEOF
-    ) &
+    _launch_mt5
+    show_message "MT5 relaunched with [StartUp] EA auto-attach — bot starts now."
 fi
 
 # ── MT5 auto-heal watchdog (power-loss / crash safety net) ────────
@@ -803,50 +774,22 @@ print("ESTAB" if estab else ("LISTEN" if listen else "NONE"))
 PYEOF
 }
 
+# MT5 is being (re)started — relaunch via the [StartUp] config so it opens its
+# own chart and live-attaches the EA (the mechanism that works on this build).
 _relaunch_mt5() {
-    # MT5 is being (re)started — re-inject the EA (idempotent) and patch
-    # AutoTrading flags so the profile MT5 reopens carries the EA.
-    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
-    _patch_terminal_ini
-    DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
-        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
-}
-
-# Snapshot the CURRENTLY-OPEN, healthy profile (its .chr files AND the order.wnd
-# that lists chart01 as open) so the next boot can restore it and MT5 opens
-# chart01 + the EA on the first launch. Called only when the EA is connected, so
-# order.wnd is guaranteed to reference the chart the EA lives on.
-_snapshot_good_profile() {
-    [ -d "${_ACTIVE_PROFILE_DIR}" ] || return 0
-    [ -f "${_ACTIVE_PROFILE_DIR}/order.wnd" ] || return 0   # nothing to capture yet
-    rm -rf "${_GOOD_PROFILE_SNAPSHOT}.tmp"
-    mkdir -p "${_GOOD_PROFILE_SNAPSHOT}.tmp"
-    cp -f "${_ACTIVE_PROFILE_DIR}/"*.chr     "${_GOOD_PROFILE_SNAPSHOT}.tmp/" 2>/dev/null || true
-    cp -f "${_ACTIVE_PROFILE_DIR}/order.wnd" "${_GOOD_PROFILE_SNAPSHOT}.tmp/" 2>/dev/null || true
-    # Commit atomically only if we captured the order.wnd (the key file).
-    if [ -f "${_GOOD_PROFILE_SNAPSHOT}.tmp/order.wnd" ]; then
-        rm -rf "${_GOOD_PROFILE_SNAPSHOT}"
-        mv "${_GOOD_PROFILE_SNAPSHOT}.tmp" "${_GOOD_PROFILE_SNAPSHOT}"
-        show_message "[watchdog] Snapshotted healthy chart profile (order.wnd + charts) — first-launch EA load is now persistent."
-    else
-        rm -rf "${_GOOD_PROFILE_SNAPSHOT}.tmp"
-    fi
+    _launch_mt5
 }
 
 _WATCHDOG_INTERVAL=20
-_HEAL_AFTER_SECS=90          # bot listening but no EA for this long → kick MT5
-_MAX_HEALS=3                 # after this many failed kicks, STOP thrashing MT5
+_HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/ [StartUp]
 (
     _no_feed=0
-    _snapshotted=0
-    _heals=0
-    _gaveup=0
     while true; do
         sleep ${_WATCHDOG_INTERVAL}
 
-        # 1) MT5 process gone entirely → relaunch immediately.
+        # 1) MT5 process gone entirely → relaunch with [StartUp] immediately.
         if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
-            show_message "[watchdog] MT5 not running — re-injecting EA and relaunching..."
+            show_message "[watchdog] MT5 not running — relaunching with [StartUp] EA..."
             _relaunch_mt5
             _no_feed=0
             sleep 30
@@ -856,50 +799,20 @@ _MAX_HEALS=3                 # after this many failed kicks, STOP thrashing MT5
         # 2) MT5 is up — is the EA actually connected to our feed?
         case "$(_feed_state)" in
             ESTAB)
-                _no_feed=0            # healthy — EA streaming ticks
-                _heals=0             # connection is good → re-arm healing
-                _gaveup=0
-                # Capture the working profile ONCE per session (after a short
-                # settle so MT5 has flushed order.wnd with chart01 open). Next
-                # boot restores it → EA loads on the first launch. This is also
-                # how a one-time manual drag gets persisted automatically.
-                if [ ${_snapshotted} -eq 0 ]; then
-                    sleep 10
-                    _snapshot_good_profile
-                    _snapshotted=1
-                fi
+                _no_feed=0            # healthy — EA streaming ticks, sit idle
                 ;;
             LISTEN)
-                # Bot is listening but the EA hasn't connected.
-                if [ ${_gaveup} -eq 1 ]; then
-                    # Already exhausted auto-load attempts — do NOT thrash MT5.
-                    # Wait quietly for a one-time manual attach (which we'll snapshot).
-                    continue
-                fi
+                # Bot listening but EA not connected. Give MT5 time to cold-start
+                # + attach via [StartUp], then force a clean [StartUp] relaunch.
                 _no_feed=$((_no_feed + _WATCHDOG_INTERVAL))
                 if [ ${_no_feed} -ge ${_HEAL_AFTER_SECS} ]; then
-                    if [ ${_heals} -lt ${_MAX_HEALS} ]; then
-                        _heals=$((_heals + 1))
-                        show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — force-restarting MT5 (attempt ${_heals}/${_MAX_HEALS})..."
-                        pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-                            $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
-                        sleep 5
-                        _relaunch_mt5
-                        _no_feed=0
-                        sleep 45      # let MT5 reconnect + load EA before re-checking
-                    else
-                        _gaveup=1
-                        show_message "════════════════════════════════════════════════════════════"
-                        show_message "[watchdog] MT5 did NOT auto-load the EA after ${_MAX_HEALS} restarts."
-                        show_message "  This MT5/Wine build won't restore the EA on its own. ONE-TIME fix:"
-                        show_message "    1. Open VNC: http://localhost:3001"
-                        show_message "    2. Drag 'ZoneBotBridge' from Navigator onto the GBPUSD,H1 chart"
-                        show_message "       (Allow Algo Trading when prompted)."
-                        show_message "  It will connect, and this script auto-snapshots the working profile"
-                        show_message "  (chart + order.wnd) so it loads by itself on every future start."
-                        show_message "  No more thrashing — waiting quietly for the EA to connect."
-                        show_message "════════════════════════════════════════════════════════════"
-                    fi
+                    show_message "[watchdog] EA not connected to :${_FEED_PORT} for ${_no_feed}s — relaunching MT5 with [StartUp]..."
+                    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+                        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+                    sleep 5
+                    _relaunch_mt5
+                    _no_feed=0
+                    sleep 60      # let MT5 reconnect + run [StartUp] before re-checking
                 fi
                 ;;
             *)
