@@ -58,6 +58,33 @@ else
     show_message "[0/6] kasmvnc.yaml not found — VNC thread patch skipped."
 fi
 
+# ── [0/6] Restore experts.ini whitelist (127.0.0.1 socket access) ─
+# MT5 stores the "Allow WebRequest for listed URL" entries in an encrypted
+# binary Config/experts.ini keyed to the MachineGuid. Without 127.0.0.1 in
+# the list, SocketConnect returns err=4014 and the EA never connects.
+# Since MachineGuid is pinned (constant across restarts), the encrypted blob
+# remains valid — so we can back it up once (after the operator adds 127.0.0.1
+# via VNC) and restore it on every subsequent start.
+EXPERTS_INI_LIVE="${MT5_CONFIG_DIR:-/config/.wine/drive_c/Program Files/MetaTrader 5/Config}/experts.ini"
+EXPERTS_INI_BACKUP="/config/experts_ini.bak"
+if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+    mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
+    cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+    show_message "[0/6] experts.ini restored from backup (127.0.0.1 whitelist preserved)."
+elif [ -f "${EXPERTS_INI_BACKUP}" ] && [ -f "${EXPERTS_INI_LIVE}" ]; then
+    # If the live file is smaller than the backup it was probably reset by MT5 — restore.
+    _live_sz=$(stat -c%s "${EXPERTS_INI_LIVE}" 2>/dev/null || echo 0)
+    _bak_sz=$(stat -c%s "${EXPERTS_INI_BACKUP}" 2>/dev/null || echo 0)
+    if [ "${_live_sz}" -lt "${_bak_sz}" ]; then
+        cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
+        show_message "[0/6] experts.ini restored from backup (live file was smaller/reset)."
+    else
+        show_message "[0/6] experts.ini live file OK."
+    fi
+else
+    show_message "[0/6] No experts.ini backup yet — will save after ready_to_trade."
+fi
+
 # ── [0/6] Pin Wine MachineGuid ────────────────────────────────────
 # IC Markets treats each unique MachineGuid as a new device and triggers
 # a mobile authorization request. Wine regenerates this GUID on every
@@ -543,6 +570,17 @@ if [ ! -f /config/ready_to_trade ]; then
     echo "  ready_to_trade received — starting bot."
 else
     echo "  ready_to_trade present — resuming bot immediately."
+fi
+
+# Back up experts.ini now that the operator has confirmed setup (127.0.0.1 whitelist set).
+# MachineGuid is pinned so the encrypted blob stays valid across restarts.
+if [ -f "${EXPERTS_INI_LIVE}" ]; then
+    cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
+    show_message "experts.ini backed up to ${EXPERTS_INI_BACKUP} (whitelist will auto-restore on future starts)."
+else
+    show_message "WARNING: ${EXPERTS_INI_LIVE} not found — cannot back up whitelist."
+    show_message "  → Open MT5 VNC, go to Tools → Options → Expert Advisors,"
+    show_message "     add 127.0.0.1 to 'Allow WebRequest', click OK, then restart the container."
 fi
 
 # ── Deploy and compile ZoneBotBridge EA ──────────────────────────
