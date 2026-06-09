@@ -783,13 +783,16 @@ _probe_timeout=300
 _probe_wait=0
 show_message "Probing MT5 IPC readiness before starting bot (up to ${_probe_timeout}s)..."
 while [ ${_probe_wait} -lt ${_probe_timeout} ]; do
-    if DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-        $wine_executable python -c "import MetaTrader5 as m, sys; ok=m.initialize(timeout=20000); m.shutdown(); sys.exit(0 if ok else 1)" \
-        2>/dev/null; then
+    # The probe prints the exact reason on each failure (import fault vs IPC
+    # not ready vs which path works) so we can diagnose instead of guess.
+    _probe_out=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+        $wine_executable python /bot/tools/mt5_probe.py 2>/dev/null)
+    _probe_rc=$?
+    show_message "  [probe ${_probe_wait}s] ${_probe_out}"
+    if [ ${_probe_rc} -eq 0 ]; then
         show_message "MT5 IPC reachable after ${_probe_wait}s — starting bot."
         break
     fi
-    show_message "  …MT5 not IPC-ready yet (${_probe_wait}s elapsed), retrying…"
     sleep 10
     _probe_wait=$((_probe_wait + 10))
 done
