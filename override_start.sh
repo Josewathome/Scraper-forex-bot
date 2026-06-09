@@ -623,17 +623,8 @@ fi
 if [ -f "${EA_EX5}" ]; then
     _symbols="${SYMBOLS_CSV:-GBPUSD,XAUUSD,USDJPY,AUDUSD,USDCHF}"
 
-    # inject_ea_chart.py resolves the active profile dir, removes any stray
-    # EA instances, and attaches a single ZoneBotBridge to the GBPUSD H1 chart.
-    #   exit 0 = chart modified  → MT5 restart required
-    #   exit 2 = already correct → no restart needed
-    _chart_inject_result=0
-    SYMBOLS_CSV="${_symbols}" python3 /bot/tools/inject_ea_chart.py
-    _chart_inject_result=$?
-    show_message "EA chart injection complete (exit=${_chart_inject_result})."
-
-    # Also write AutoTrade.ini as belt-and-suspenders for fresh installs
-    # (when no .chr files exist yet, AutoTrade.ini fires on first MT5 launch).
+    # AutoTrade.ini belt-and-suspenders for fresh installs (when no .chr exists
+    # yet, AutoTrade.ini fires on first MT5 launch).
     if ! grep -q "ZoneBotBridge" "${AUTO_TRADE_INI}" 2>/dev/null; then
         printf '[Expert]\r\nName=ZoneBotBridge\r\nSymbol=GBPUSD\r\nPeriod=H1\r\n' > "${AUTO_TRADE_INI}"
         printf 'Parameters=PUB_ENDPOINT=tcp://127.0.0.1:5556;SYMBOLS_CSV=%s;HEARTBEAT_SECS=5\r\n' \
@@ -641,28 +632,49 @@ if [ -f "${EA_EX5}" ]; then
         show_message "AutoTrade.ini written as fallback for fresh installs."
     fi
 
-    # Restart MT5 ONLY when the chart was freshly modified (exit 0).
-    # When the EA was already in the chart (exit 2) MT5 already has it loaded —
-    # restarting would waste 25 s and briefly drop the broker connection.
-    # Restart MT5 if:
-    #   exit=0 → chart was freshly modified (EA just injected), OR
-    #   _ex5_compiled=1 → .ex5 was just compiled in this run.
-    # The second condition is critical: MT5 started before the .ex5 existed
-    # (pre-launch injects the chart entry but the .ex5 isn't compiled until
-    # after the ready_to_trade gate). Without a restart here, MT5 silently
-    # skips the EA on startup and never retries — OnInit() never fires.
-    if [ "${_chart_inject_result}" -eq 0 ] || [ "${_ex5_compiled:-0}" -eq 1 ]; then
-        show_message "Restarting MT5 to load compiled EA (chart_modified=${_chart_inject_result}, ex5_compiled=${_ex5_compiled:-0})..."
-        pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
-            $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
-        sleep 5
-        _patch_terminal_ini
-        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
-        show_message "MT5 restarted — waiting 25s for EA to bind ZMQ PUB socket..."
-        sleep 25
-    else
-        show_message "EA and .ex5 already present from previous run — MT5 restart skipped."
-    fi
+    # ── Stop MT5 → inject → start (avoid the edit-while-running race) ──
+    # MT5 keeps the whole chart profile in MEMORY and rewrites every .chr on
+    # save/exit. Editing .chr while MT5 is running is therefore racy: MT5
+    # clobbers the edit on its next save, restoring stale multi-instance state,
+    # and the relaunch never cleanly loads the EA (OnInit never fires, MQL5/Logs
+    # stays empty, the TCP client never connects).
+    #
+    # So we ALWAYS: kill MT5 → inject into the now-quiescent on-disk profile →
+    # relaunch, so MT5 reads exactly one GBPUSD H1 EA fresh. This also fixes the
+    # ordering problem where MT5 was launched (line ~486) before the .ex5 was
+    # compiled — by the time we relaunch here the .ex5 exists, so the EA loads.
+    show_message "Stopping MT5 to inject EA into a clean profile (no edit-while-running race)..."
+    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+        $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
+    sleep 5
+
+    SYMBOLS_CSV="${_symbols}" python3 /bot/tools/inject_ea_chart.py
+    show_message "EA chart injection complete (exit=$?)."
+
+    _patch_terminal_ini
+    $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+    show_message "MT5 (re)started with compiled EA — waiting for OnInit + socket connect..."
+    sleep 25
+
+    # Confirm the EA actually attached — surface the result in the startup log
+    # so a failed auto-load is obvious instead of silently producing no ticks.
+    python3 - <<'VERIFY_PYEOF'
+import glob, os, time
+logdir = "/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
+deadline, hit = time.time() + 60, None
+while time.time() < deadline and not hit:
+    logs = sorted(glob.glob(os.path.join(logdir, "*.log")), key=os.path.getmtime, reverse=True)
+    if logs:
+        data = open(logs[0], "rb").read().decode("utf-16-le", errors="replace")
+        for line in reversed(data.splitlines()):
+            if "ZoneBotBridge" in line and "loaded successfully" in line:
+                hit = line.strip()
+                break
+    if not hit:
+        time.sleep(5)
+print("EA auto-load check:", hit if hit else
+      "NOT loaded within 60s — verify Algo Trading is enabled and the Default profile is active")
+VERIFY_PYEOF
 fi
 
 # ── MT5 watchdog ─────────────────────────────────────────────────
