@@ -765,6 +765,7 @@ fi
         fi
     done
 ) &
+_watchdog_pid=$!
 show_message "MT5 watchdog started."
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
@@ -802,11 +803,45 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
 fi
 
+# ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
+# THE persistence fix. `docker compose down` sends SIGTERM and the container is
+# killed seconds later — if MT5 is hard-killed it does NOT save its session, so
+# on the next boot it may open with no chart and the EA never auto-loads (even
+# though chart01.chr holds it on disk). That is exactly the intermittent
+# "have to drag the EA again" symptom.
+#
+# Here we trap SIGTERM/SIGINT and close MT5 *cleanly* (taskkill WITHOUT /F = a
+# normal window close). A clean close makes MT5 persist its open chart and the
+# expert attached to it, so on the next start MT5 restores the EA itself — no
+# manual drag, deterministically. We stop the watchdog first so it can't
+# relaunch MT5 mid-shutdown.
+_graceful_shutdown() {
+    show_message "Container stopping — closing MT5 cleanly so it saves the chart+EA session..."
+    # Stop the watchdog so it doesn't relaunch MT5 while we're closing it.
+    [ -n "${_watchdog_pid:-}" ] && kill "${_watchdog_pid}" 2>/dev/null || true
+    # Clean close (NO /F): lets MT5 write its profile/lastsession with the EA.
+    pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
+        $wine_executable taskkill /IM terminal64.exe 2>/dev/null || true
+    # Give MT5 time to flush the session to disk before the container dies.
+    sleep 8
+    # Tell the bot to stop (its own SIGTERM handler flushes a checkpoint).
+    [ -n "${_bot_pid:-}" ] && kill "${_bot_pid}" 2>/dev/null || true
+    wait "${_bot_pid:-}" 2>/dev/null || true
+    show_message "Clean shutdown complete — EA session saved for next start."
+    exit 0
+}
+trap _graceful_shutdown SIGTERM SIGINT
+
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
 # Wine reports os.name == "nt" so mt5_gateway.py uses direct
 # MetaTrader5 import — no RPyC bridge.
 # PYTHONUTF8=1 forces UTF-8 to prevent cp1252 crashes on box-drawing chars.
+# Run in BACKGROUND + wait so the trap above can fire on container stop
+# (a foreground command would swallow the signal until it returns).
 echo "Starting ZoneBot (stream mode) in Wine Python..."
 cd /bot && DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-    $wine_executable python -m src.main_stream
+    $wine_executable python -m src.main_stream &
+_bot_pid=$!
+# `wait` returns when the bot exits OR when a trapped signal fires.
+wait "${_bot_pid}"
