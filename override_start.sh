@@ -449,6 +449,31 @@ _PATCH_PYEOF
 _patch_terminal_ini
 show_message "terminal.ini patched for AutoTrading."
 
+# ── Decide whether the EA needs recompiling — BEFORE the launch ───
+# The old script deleted + recompiled the .ex5 on EVERY boot, which forced a
+# compile-then-force-kill-then-relaunch cycle every single time. That restart
+# disrupts MT5 right as the Python bot calls mt5.initialize(), producing the
+# repeating "(-10005, IPC timeout) Terminal not running" loop: MT5 is mid
+# broker-resync and not yet IPC-ready.
+#
+# New rule: only recompile when the EA source actually changed (or no .ex5
+# exists). When the .ex5 is already current, inject the EA into the chart NOW —
+# before the single MT5 launch — so MT5 loads it on startup with NO restart.
+EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
+EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
+EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
+_recompile_needed=0
+if [ ! -f "${EA_EX5}" ]; then
+    _recompile_needed=1
+    show_message "EA: no compiled .ex5 yet — will compile, then restart MT5 once."
+elif [ "${EA_SRC}" -nt "${EA_EX5}" ]; then
+    _recompile_needed=1
+    show_message "EA: source newer than .ex5 — will recompile, then restart MT5 once."
+else
+    show_message "EA: .ex5 up to date — injecting into chart before launch (no restart)."
+    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
+fi
+
 # ── [3/6] Launch MT5 terminal ─────────────────────────────────────
 if [ -e "$mt5file" ]; then
     show_message "[3/6] Launching MT5 terminal..."
@@ -542,28 +567,21 @@ else
     fi
 fi
 
-# ── Deploy and compile ZoneBotBridge EA ──────────────────────────
-EA_SRC="/bot/src/infrastructure/mt5_bridge/ea/ZoneBotBridge.mq5"
-EA_DST="${MT5_EXPERTS_DIR}/ZoneBotBridge.mq5"
-EA_EX5="${MT5_EXPERTS_DIR}/ZoneBotBridge.ex5"
-AUTO_TRADE_INI="${MT5_CONFIG_DIR}/AutoTrade.ini"
-# Always delete the old .ex5 so the EA is recompiled from the current source
-# on every startup. This ensures the correct version (v3, built-in sockets,
-# no DLL imports) is always running, regardless of what was compiled before.
-if [ -f "${EA_EX5}" ]; then
-    rm -f "${EA_EX5}"
-    show_message "Old ZoneBotBridge.ex5 removed — will recompile fresh."
-fi
-_ex5_existed=0
-
+# ── Deploy and compile ZoneBotBridge EA (only when needed) ────────
 # Ensure directories exist (MT5 should have created them, but be safe)
 mkdir -p "${MT5_EXPERTS_DIR}" "${MT5_CONFIG_DIR}"
 
 # EA v3 uses MT5 built-in sockets — no ZMQ DLLs needed for compile or runtime.
 
-if [ -f "${EA_SRC}" ]; then
+# When the .ex5 is already current we pre-injected the EA before launch and MT5
+# is loading it now — skip the whole compile + restart cycle entirely.
+if [ "${_recompile_needed}" -eq 0 ]; then
+    show_message "EA already compiled and pre-injected — skipping recompile/restart."
+elif [ -f "${EA_SRC}" ]; then
     cp "${EA_SRC}" "${EA_DST}"
     show_message "ZoneBotBridge.mq5 deployed to MQL5/Experts/"
+    # Remove any stale .ex5 so the "compiled successfully" check below is real.
+    rm -f "${EA_EX5}"
 
     # Compile with MetaEditor if available.
     # MetaEditor needs MT5 to be fully authorized and MQL5 environment loaded
@@ -623,10 +641,6 @@ for line in data.splitlines():
         _compile_log="${MT5_EXPERTS_DIR}/ZoneBotBridge.log"
         if [ -f "${EA_EX5}" ]; then
             show_message "ZoneBotBridge.ex5 compiled successfully."
-            # Only flag as "freshly compiled" if the .ex5 didn't exist before
-            # this run — avoids an unnecessary MT5 restart on every container
-            # restart when the binary is already present from a previous run.
-            [ "${_ex5_existed:-0}" -eq 0 ] && _ex5_compiled=1 || true
         else
             show_message "WARNING: ZoneBotBridge.ex5 not produced."
             if [ -f "${_compile_log}" ]; then
@@ -666,7 +680,12 @@ fi
 # chart carrying the <expert> block loads the EA. We do NOT empty the profile
 # (that removed the very charts MT5 reopens, which is why [StartUp] left us
 # with zero EA). inject_ea_chart.py enforces exactly ONE instance.
-if [ -f "${EA_EX5}" ]; then
+#
+# This restart ONLY runs when we just (re)compiled — i.e. the EA wasn't loaded
+# at the initial launch because the .ex5 didn't exist yet. On a normal restart
+# the .ex5 was current, we pre-injected before launch, and MT5 already has the
+# EA — so we skip this disruptive cycle and avoid the IPC-timeout window.
+if [ "${_recompile_needed}" -eq 1 ] && [ -f "${EA_EX5}" ]; then
     # Count existing EA loads so the verify poll below only accepts a NEW one
     # (the persistent journal carries stale "loaded successfully" lines).
     _ea_loads_before=$(python3 -c "
