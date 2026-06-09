@@ -154,8 +154,12 @@ class LiquidityPool:
 class NewsEvent:
     currency:   str
     event_name: str
-    time:       datetime
-    impact:     str        # "high", "medium", "low"
+    event_time: datetime
+    impact:     str             # "high", "medium", "low"
+    actual:     str | None = None
+    forecast:   str | None = None
+    previous:   str | None = None
+    source:     str = ""
 
 
 @dataclass
