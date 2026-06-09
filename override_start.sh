@@ -65,8 +65,17 @@ fi
 # Since MachineGuid is pinned (constant across restarts), the encrypted blob
 # remains valid — so we can back it up once (after the operator adds 127.0.0.1
 # via VNC) and restore it on every subsequent start.
-EXPERTS_INI_LIVE="${MT5_CONFIG_DIR:-/config/.wine/drive_c/Program Files/MetaTrader 5/Config}/experts.ini"
+_MT5_CONFIG_DIR_EARLY="/config/.wine/drive_c/Program Files/MetaTrader 5/Config"
+EXPERTS_INI_LIVE="${_MT5_CONFIG_DIR_EARLY}/experts.ini"
 EXPERTS_INI_BACKUP="/config/experts_ini.bak"
+# Fresh-volume fallback: if a full Config/ backup exists but the live Config has
+# no experts.ini, restore the backed-up files we don't already have (preserves
+# the whitelist whichever file carries it on this build).
+if [ -d /config/mt5_config_backup ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
+    mkdir -p "${_MT5_CONFIG_DIR_EARLY}"
+    cp -rn /config/mt5_config_backup/. "${_MT5_CONFIG_DIR_EARLY}/" 2>/dev/null || true
+    show_message "[0/6] Restored MT5 Config/ from full backup (whitelist preserved)."
+fi
 if [ -f "${EXPERTS_INI_BACKUP}" ] && [ ! -f "${EXPERTS_INI_LIVE}" ]; then
     mkdir -p "$(dirname "${EXPERTS_INI_LIVE}")"
     cp "${EXPERTS_INI_BACKUP}" "${EXPERTS_INI_LIVE}"
@@ -572,15 +581,26 @@ else
     echo "  ready_to_trade present — resuming bot immediately."
 fi
 
-# Back up experts.ini now that the operator has confirmed setup (127.0.0.1 whitelist set).
-# MachineGuid is pinned so the encrypted blob stays valid across restarts.
+# Back up the whitelist now that the operator has confirmed setup.
+# The "Allow WebRequest for listed URL" entries (which authorize SocketConnect
+# to 127.0.0.1, fixing err=4014) are stored encrypted in MT5's Config dir,
+# keyed to the MachineGuid. MachineGuid is pinned, so the blob stays valid.
+# The exact filename varies by build (experts.ini on some, folded into the
+# encrypted terminal config on others) — so back up every .ini in Config/ and
+# log what's actually there so we capture whichever file carries the whitelist.
 if [ -f "${EXPERTS_INI_LIVE}" ]; then
     cp "${EXPERTS_INI_LIVE}" "${EXPERTS_INI_BACKUP}"
     show_message "experts.ini backed up to ${EXPERTS_INI_BACKUP} (whitelist will auto-restore on future starts)."
 else
-    show_message "WARNING: ${EXPERTS_INI_LIVE} not found — cannot back up whitelist."
-    show_message "  → Open MT5 VNC, go to Tools → Options → Expert Advisors,"
-    show_message "     add 127.0.0.1 to 'Allow WebRequest', click OK, then restart the container."
+    show_message "NOTE: ${EXPERTS_INI_LIVE} not present on this build. Config/ contents:"
+    ls -la "${MT5_CONFIG_DIR}" 2>/dev/null | sed 's/^/    /' || true
+    # Back up the whole Config dir as a fallback so no whitelist file is missed.
+    if [ -d "${MT5_CONFIG_DIR}" ]; then
+        rm -rf /config/mt5_config_backup
+        cp -r "${MT5_CONFIG_DIR}" /config/mt5_config_backup 2>/dev/null \
+            && show_message "Full Config/ backed up to /config/mt5_config_backup." \
+            || show_message "WARNING: Config/ backup failed."
+    fi
 fi
 
 # ── Deploy and compile ZoneBotBridge EA ──────────────────────────
@@ -695,14 +715,18 @@ else
     show_message "WARNING: EA source not found at ${EA_SRC}"
 fi
 
-# ── Relaunch MT5 with [StartUp] so the compiled EA auto-attaches ──
+# ── Relaunch MT5 with the EA injected into its active chart profile ──
 # MT5 was first launched (above) before the .ex5 existed, so it has no EA.
-# Now that ZoneBotBridge.ex5 is compiled, stop MT5, empty the profile (so the
-# only chart is the one [StartUp] opens — single instance for the single-client
-# TCP feed), and relaunch with the [StartUp] config. Per the MT5 docs, [StartUp]
-# with Symbol set opens its own GBPUSD H1 chart and attaches the EA regardless
-# of saved session/profile state — which the old .chr-injection approach could
-# not guarantee after a force-kill emptied MT5's open-chart session.
+# Now that ZoneBotBridge.ex5 is compiled, stop MT5, inject the EA into the
+# .chr file of the profile MT5 actually loads, and relaunch normally.
+#
+# WHY injection and NOT [StartUp]: the /config:[StartUp] mechanism does not
+# work under this Wine build (MT5 ignores the directive — "NOT loaded within
+# 75s" every time). The .chr-injection approach IS proven to work here: MT5
+# reopens the charts present in its active profile directory on launch, and a
+# chart carrying the <expert> block loads the EA. We do NOT empty the profile
+# (that removed the very charts MT5 reopens, which is why [StartUp] left us
+# with zero EA). inject_ea_chart.py enforces exactly ONE instance.
 if [ -f "${EA_EX5}" ]; then
     # Count existing EA loads so the verify poll below only accepts a NEW one
     # (the persistent journal carries stale "loaded successfully" lines).
@@ -715,14 +739,17 @@ for l in ls:
 print(n)
 " 2>/dev/null || echo 0)
 
-    show_message "Stopping MT5 to relaunch with [StartUp] EA (clean single instance)..."
+    show_message "Stopping MT5 to inject EA into its active chart profile..."
     pgrep -f "terminal64.exe" > /dev/null 2>&1 && \
         $wine_executable taskkill /IM terminal64.exe /F 2>/dev/null || true
     sleep 5
-    _empty_active_profile
+    # Inject the EA into the profile MT5 reloads (single instance enforced).
+    SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
     _patch_terminal_ini
-    _launch_mt5_with_ea
-    show_message "MT5 relaunched with [StartUp] EA — waiting for OnInit + socket connect..."
+    # Launch MT5 normally — it reopens its profile charts (now carrying the EA).
+    DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
+        $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
+    show_message "MT5 relaunched with injected EA — waiting for OnInit + socket connect..."
     sleep 25
 
     # Verify a NEW EA load appeared (count increased) — not a stale journal line.
@@ -742,7 +769,7 @@ while time.time() < deadline and not hit:
     else:
         time.sleep(5)
 print("EA auto-load check:", hit if hit else
-      "NOT loaded within 75s — [StartUp] did not attach the EA (investigate before relying on it)")
+      "NOT loaded within 75s — EA did not attach (check MT5 journal in VNC)")
 VERIFY_PYEOF
 fi
 
@@ -763,13 +790,14 @@ fi
     while true; do
         sleep 20
         if ! pgrep -f "terminal64.exe" > /dev/null 2>&1; then
-            show_message "[watchdog] MT5 not running — relaunching with [StartUp] EA..."
-            # MT5 is dead, so emptying the profile is safe — guarantees the EA
-            # re-attaches via [StartUp] on a single chart, not via a possibly
-            # empty saved session.
-            _empty_active_profile
+            show_message "[watchdog] MT5 not running — re-injecting EA and relaunching..."
+            # MT5 is dead, so editing its .chr files is safe. Re-inject (idempotent
+            # — exits 2 if already correct) so the EA re-attaches when MT5 reopens
+            # its profile charts, then launch normally. Do NOT empty the profile.
+            SYMBOLS_CSV="${SYMBOLS_CSV:-}" python3 /bot/tools/inject_ea_chart.py || true
             _patch_terminal_ini
-            _launch_mt5_with_ea
+            DISPLAY=:1 WINEPREFIX=/config/.wine WINEDEBUG=-all \
+                $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
             sleep 30
         fi
     done
