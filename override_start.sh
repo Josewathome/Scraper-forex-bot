@@ -475,20 +475,6 @@ else
 fi
 
 # ── [3/6] Launch MT5 terminal ─────────────────────────────────────
-# Record a baseline of "terminal synchronized" occurrences in the persistent
-# daily journal BEFORE launching, so the sync-wait before the bot only accepts
-# a NEW sync from THIS launch (the daily log carries stale entries from earlier
-# container runs the same day, which would otherwise pass instantly).
-MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
-_sync_baseline=$(python3 -c "
-import glob,os
-ls=sorted(glob.glob('${MT5_LOG_DIR}/*.log'),key=os.path.getmtime)
-n=0
-for l in ls:
-    n+=open(l,'rb').read().decode('utf-16-le','replace').lower().count('terminal synchronized')
-print(n)
-" 2>/dev/null || echo 0)
-
 if [ -e "$mt5file" ]; then
     show_message "[3/6] Launching MT5 terminal..."
     $wine_executable start /unix "$mt5file" $MT5_CMD_OPTIONS &
@@ -781,36 +767,36 @@ fi
 ) &
 show_message "MT5 watchdog started."
 
-# ── Wait for MT5 to be IPC-ready before starting the bot ──────────
+# ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
 # empty, so it does not launch one). MT5 only answers that IPC pipe AFTER it
-# has finished its Wine cold-start and broker handshake — until then
-# initialize() returns (-10005, IPC timeout). The old script implicitly waited
-# here because it alway recompiled (which polls for "terminal synchronized"
-# before compiling). Now that recompiles are skipped on normal restarts, we
-# must wait explicitly, or the bot burns its retry budget before MT5 is up.
-_sync_wait=0
-_sync_timeout=240
-show_message "Waiting for MT5 to synchronize before starting bot (up to ${_sync_timeout}s)..."
-while [ ${_sync_wait} -lt ${_sync_timeout} ]; do
-    # Accept only a NEW "terminal synchronized" (count beyond the pre-launch
-    # baseline) so a stale same-day journal entry can't pass us instantly.
-    if _sync_baseline="${_sync_baseline}" python3 -c "
-import glob,os,sys
-ls=sorted(glob.glob('${MT5_LOG_DIR}/*.log'),key=os.path.getmtime)
-n=0
-for l in ls:
-    n+=open(l,'rb').read().decode('utf-16-le','replace').lower().count('terminal synchronized')
-sys.exit(0 if n > int(os.environ.get('_sync_baseline','0')) else 1)
-" 2>/dev/null; then
-        show_message "MT5 synchronized — starting bot."
+# finishes its Wine cold-start + broker handshake; until then initialize()
+# returns (-10005, IPC timeout).
+#
+# Rather than guess MT5's readiness from journal strings (fragile — the daily
+# log carries stale lines and the exact wording varies by build), we PROBE the
+# real capability: run a throwaway wine-python that just calls
+# mt5.initialize() and shuts down. The moment that succeeds, the bot's own
+# initialize() will succeed too. This is the exact thing that was failing, so
+# it is the correct gate — and it can never hang on a missing log string.
+_probe_timeout=300
+_probe_wait=0
+show_message "Probing MT5 IPC readiness before starting bot (up to ${_probe_timeout}s)..."
+while [ ${_probe_wait} -lt ${_probe_timeout} ]; do
+    if DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+        $wine_executable python -c "import MetaTrader5 as m, sys; ok=m.initialize(timeout=20000); m.shutdown(); sys.exit(0 if ok else 1)" \
+        2>/dev/null; then
+        show_message "MT5 IPC reachable after ${_probe_wait}s — starting bot."
         break
     fi
-    sleep 5
-    _sync_wait=$((_sync_wait + 5))
+    show_message "  …MT5 not IPC-ready yet (${_probe_wait}s elapsed), retrying…"
+    sleep 10
+    _probe_wait=$((_probe_wait + 10))
 done
-if [ ${_sync_wait} -ge ${_sync_timeout} ]; then
-    show_message "MT5 sync wait timed out — starting bot anyway (it will retry mt5.initialize)."
+if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
+    show_message "MT5 IPC probe timed out after ${_probe_timeout}s — starting bot anyway."
+    show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
+    show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
 fi
 
 # ── START BOT ─────────────────────────────────────────────────────
