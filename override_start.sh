@@ -893,123 +893,139 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
 fi
 
 # ── Ensure AutoTrading (Algo Trading) button is ON after MT5 init ─
-# terminal.ini's ExpertAdvisors key is NOT reliable for detecting the live
-# toolbar state — on this build something else controls it (possibly
-# AutoTrade.ini in Config/ or an in-memory toggle).  The only source of
-# truth is mt5.terminal_info().trade_expert: 1=button green, 0=button red.
-# We query it now (MT5 is up, IPC works) and send Ctrl+E via xdotool if
-# it's off — that is the standard MT5 keyboard shortcut for the AutoTrading
-# toolbar button (same as clicking it).
-rm -f /tmp/_mt5_autotrading_before   # clean up stale temp file
-
-# Log key config files for diagnostics so we know what on-disk state exists.
-show_message "=== Config diagnostics ==="
-for _cfile in "${MT5_CONFIG_DIR}/AutoTrade.ini" "${MT5_CONFIG_DIR}/settings.ini" "${MT5_CONFIG_DIR}/terminal.ini"; do
-    if [ -f "${_cfile}" ]; then
-        _cname=$(basename "${_cfile}")
-        _cval=$(python3 -c "
-import os
-data = open('${_cfile}','rb').read()
-if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
-    text = data.decode('utf-16-le', errors='replace')
-else:
-    text = data.decode('utf-8', errors='replace')
-lines = [l.strip() for l in text.splitlines() if l.strip()]
-# Print section headers + any Expert/AutoTrade related lines
-for l in lines:
-    if l.startswith('[') or any(k in l.lower() for k in ('expert','autotrade','allow','enable','algo')):
-        print(l)
-" 2>/dev/null | head -30 || true)
-        show_message "${_cname}: ${_cval}"
-    fi
-done
-show_message "=== End config diagnostics ==="
-
-# Patch AutoTrade.ini if it exists — this file may hold the live AutoTrading
-# toggle state that overrides terminal.ini on this build.
-if [ -f "${MT5_CONFIG_DIR}/AutoTrade.ini" ]; then
-    python3 - "${MT5_CONFIG_DIR}/AutoTrade.ini" <<'_AUTOTRADE_PYEOF'
-import sys
-path = sys.argv[1]
-data = open(path, 'rb').read()
-if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
-    text = data.decode('utf-16-le', errors='replace')
-    enc, bom = 'utf-16-le', b'\xff\xfe'
-else:
-    text = data.decode('utf-8', errors='replace')
-    enc, bom = 'utf-8', b''
-lines = text.splitlines()
-new_lines = []
-patched = []
-for line in lines:
-    s = line.strip()
-    # Patch any known AutoTrading disable keys
-    if s.lower().startswith('enabled=') or s.lower().startswith('enable='):
-        new_lines.append(s.split('=')[0] + '=1'); patched.append(s); continue
-    if s.lower().startswith('allowlivetrading='):
-        new_lines.append(s.split('=')[0] + '=true'); patched.append(s); continue
-    new_lines.append(line)
-result = '\r\n'.join(new_lines) + '\r\n'
-open(path, 'wb').write(bom + result.encode(enc))
-if patched:
-    print('AutoTrade.ini patched:', patched)
-else:
-    print('AutoTrade.ini: no known keys to patch (content preserved)')
-_AUTOTRADE_PYEOF
-fi
+# Two problems with previous approaches:
+#   1. mt5.terminal_info() fails — can't open a second IPC connection right
+#      after the probe's shutdown() in the same Wine session.
+#   2. xdotool search --name "MetaTrader" finds nothing — window title on
+#      this Wine/KasmVNC build doesn't match that pattern.
+#
+# Fix: read the MT5 JOURNAL LOG to detect the live state (MT5 already writes
+# "expert advisors disabled/enabled" there — no IPC connection needed), and
+# find the window by listing ALL visible X11 windows and matching any title
+# that looks like MT5.
+rm -f /tmp/_mt5_autotrading_before
 
 # Re-patch terminal.ini after MT5 init for next-restart correctness.
 show_message "Re-patching terminal.ini after MT5 init..."
 _patch_terminal_ini
 
-# Query the LIVE AutoTrading state from MT5 directly.
-# mt5.terminal_info().trade_expert == 1 → button green; 0 → button red.
-_live_autotrading=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-    $wine_executable python -c "
-import MetaTrader5 as mt5, sys
-if not mt5.initialize():
-    print('UNKNOWN'); sys.exit(0)
-info = mt5.terminal_info()
-mt5.shutdown()
-print('ON' if info and info.trade_expert == 1 else 'OFF')
-" 2>/dev/null || echo "UNKNOWN")
-show_message "Live MT5 AutoTrading state: ${_live_autotrading}"
+# ── Detect AutoTrading state from MT5 journal log ─────────────────
+MT5_LOG_DIR="/config/.wine/drive_c/Program Files/MetaTrader 5/logs"
+_read_autotrading_from_journal() {
+    # Returns "OFF", "ON", or "UNKNOWN"
+    local _log
+    _log=$(ls -t "${MT5_LOG_DIR}"/*.log 2>/dev/null | head -1)
+    [ -z "${_log}" ] && echo "UNKNOWN" && return
+    python3 - "${_log}" <<'_JOURNAL_PY'
+import sys
+path = sys.argv[1]
+try:
+    data = open(path, 'rb').read()
+    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        text = data.decode('utf-16-le', errors='replace')
+    else:
+        text = data.decode('utf-8', errors='replace')
+    lines = text.splitlines()
+    # Scan from the END for the most recent AutoTrading toggle line
+    for line in reversed(lines):
+        lo = line.lower()
+        if 'expert advisors' in lo or 'autotrading' in lo or 'algo trading' in lo:
+            print('LINE:' + line.strip())
+            if 'disabled' in lo or 'off' in lo or '= false' in lo:
+                print('STATE:OFF')
+            else:
+                print('STATE:ON')
+            sys.exit(0)
+except Exception as e:
+    print('ERR:' + str(e))
+print('STATE:UNKNOWN')
+_JOURNAL_PY
+}
+_journal_out=$(_read_autotrading_from_journal)
+show_message "MT5 journal AutoTrading scan: ${_journal_out}"
+_journal_state=$(echo "${_journal_out}" | grep '^STATE:' | cut -d: -f2)
+[ -z "${_journal_state}" ] && _journal_state="UNKNOWN"
+show_message "AutoTrading state from journal: ${_journal_state}"
 
-# Always send Ctrl+E to ensure AutoTrading ends up ON.
-# Ctrl+E is a toggle, so we verify after each send and retry if needed.
-# Hard cap of 4 attempts to avoid looping indefinitely.
-_mt5_win=$(DISPLAY=:1 xdotool search --name "MetaTrader" 2>/dev/null | head -1 || true)
+# ── Find the MT5 X11 window ────────────────────────────────────────
+# Wait up to 30s for the window to appear, try multiple patterns.
+_mt5_win=""
+show_message "Searching for MT5 X11 window (up to 30s)..."
+_win_elapsed=0
+while [ -z "${_mt5_win}" ] && [ ${_win_elapsed} -lt 30 ]; do
+    # Try broad regex — matches "MetaTrader 5", "MetaTrader5", MT5 variants
+    _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*[Mm]eta[Tt]rader.*" 2>/dev/null \
+        | head -1 || true)
+    # Also try matching any visible window whose title contains known patterns
+    if [ -z "${_mt5_win}" ]; then
+        _mt5_win=$(DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null \
+            | while read -r _wid; do
+                _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+                case "${_wn}" in
+                    *[Mm]eta*|*[Tt]rader*|*terminal64*|*ICMarkets*|*HFM*|*[Mm][Tt]5*) echo "${_wid}"; break ;;
+                esac
+              done | head -1 || true)
+    fi
+    if [ -n "${_mt5_win}" ]; then
+        _wt=$(DISPLAY=:1 xdotool getwindowname "${_mt5_win}" 2>/dev/null || true)
+        show_message "MT5 window found: id=${_mt5_win} title='${_wt}'"
+        break
+    fi
+    sleep 3
+    _win_elapsed=$((_win_elapsed + 3))
+done
+
+if [ -z "${_mt5_win}" ]; then
+    # Diagnostic: list every visible window so we know the exact title to match next time
+    show_message "WARNING: MT5 window not found after ${_win_elapsed}s. All visible X11 windows:"
+    DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null | head -30 | \
+        while read -r _wid; do
+            _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
+            _wc=$(DISPLAY=:1 xdotool getwindowclassname "${_wid}" 2>/dev/null || true)
+            show_message "  wid=${_wid} class=${_wc} name='${_wn}'"
+        done || true
+    show_message "AutoTrading must be enabled manually: VNC http://localhost:3001 → AutoTrading toolbar button."
+fi
+
+# ── Send Ctrl+E to enable AutoTrading, up to 4 attempts ──────────
+# Only send if: window found AND (journal says OFF, or journal is UNKNOWN).
+# If journal says ON we still send once to be safe (see user requirement),
+# then verify with a second journal read.
 if [ -n "${_mt5_win}" ]; then
-    _at_attempts=0
     _at_max=4
-    _at_state="UNKNOWN"
+    _at_attempts=0
+    _at_final="UNKNOWN"
     while [ ${_at_attempts} -lt ${_at_max} ]; do
         _at_attempts=$((_at_attempts + 1))
-        show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max}..."
-        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
-        sleep 2
-        _at_state=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-            $wine_executable python -c "
-import MetaTrader5 as mt5, sys
-if not mt5.initialize():
-    print('UNKNOWN'); sys.exit(0)
-info = mt5.terminal_info()
-mt5.shutdown()
-print('ON' if info and info.trade_expert == 1 else 'OFF')
-" 2>/dev/null || echo "UNKNOWN")
-        show_message "AutoTrading state after attempt ${_at_attempts}: ${_at_state}"
-        if [ "${_at_state}" = "ON" ]; then
-            show_message "AutoTrading confirmed ON after ${_at_attempts} attempt(s)."
+        show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max} (journal=${_journal_state})..."
+        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null || \
+            DISPLAY=:1 xdotool key ctrl+e 2>/dev/null || true
+        sleep 3
+        # Re-read journal to see if the toggle was logged
+        _new_out=$(_read_autotrading_from_journal)
+        _new_state=$(echo "${_new_out}" | grep '^STATE:' | cut -d: -f2)
+        [ -z "${_new_state}" ] && _new_state="UNKNOWN"
+        show_message "  journal after attempt ${_at_attempts}: ${_new_state} (${_new_out})"
+        if [ "${_new_state}" = "ON" ]; then
+            show_message "AutoTrading confirmed ON via journal after ${_at_attempts} attempt(s)."
+            _at_final="ON"
             break
+        elif [ "${_new_state}" = "OFF" ]; then
+            _journal_state="OFF"   # confirmed still off, send again
+        else
+            # UNKNOWN — journal didn't log a change. Treat first send as success
+            # if we sent at least once; further sends risk toggling OFF.
+            if [ ${_at_attempts} -ge 2 ]; then
+                show_message "Journal state UNKNOWN after ${_at_attempts} attempt(s) — stopping to avoid over-toggling."
+                _at_final="UNKNOWN"
+                break
+            fi
         fi
     done
-    if [ "${_at_state}" != "ON" ]; then
-        show_message "ERROR: AutoTrading could not be enabled after ${_at_max} attempts (state=${_at_state})."
-        show_message "  Manual fix: open VNC http://localhost:3001 and click the AutoTrading toolbar button."
+    if [ "${_at_final}" != "ON" ] && [ "${_at_final}" != "UNKNOWN" ]; then
+        show_message "ERROR: AutoTrading still OFF after ${_at_max} attempts."
+        show_message "  Manual fix: VNC http://localhost:3001 → click AutoTrading toolbar button."
     fi
-else
-    show_message "WARNING: xdotool could not find MT5 window — AutoTrading state unverified."
-    show_message "  Manual fix: open VNC http://localhost:3001 and verify AutoTrading is green."
 fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
