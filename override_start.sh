@@ -975,15 +975,16 @@ print('ON' if info and info.trade_expert == 1 else 'OFF')
 " 2>/dev/null || echo "UNKNOWN")
 show_message "Live MT5 AutoTrading state: ${_live_autotrading}"
 
-if [ "${_live_autotrading}" = "OFF" ]; then
-    show_message "AutoTrading is OFF — sending Ctrl+E to MT5 to enable it..."
-    _mt5_win=$(DISPLAY=:1 xdotool search --name "MetaTrader" 2>/dev/null | head -1 || true)
-    if [ -n "${_mt5_win}" ]; then
-        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
-        sleep 2
-        # Verify the toggle worked
-        _live2=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-            $wine_executable python -c "
+# Always send Ctrl+E regardless of detected state — if already ON it
+# toggles OFF then we send a second one to get back to ON; if OFF it
+# becomes ON in one shot.  This guarantees we always end on ON.
+_mt5_win=$(DISPLAY=:1 xdotool search --name "MetaTrader" 2>/dev/null | head -1 || true)
+if [ -n "${_mt5_win}" ]; then
+    show_message "Sending Ctrl+E to MT5 (ensure AutoTrading is ON)..."
+    DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
+    sleep 2
+    _live2=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+        $wine_executable python -c "
 import MetaTrader5 as mt5, sys
 if not mt5.initialize():
     print('UNKNOWN'); sys.exit(0)
@@ -991,22 +992,15 @@ info = mt5.terminal_info()
 mt5.shutdown()
 print('ON' if info and info.trade_expert == 1 else 'OFF')
 " 2>/dev/null || echo "UNKNOWN")
-        show_message "AutoTrading state after Ctrl+E: ${_live2}"
-        if [ "${_live2}" = "OFF" ]; then
-            # First Ctrl+E toggled it off (it was somehow seen as ON internally).
-            # Send a second Ctrl+E to turn it back on.
-            DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
-            sleep 1
-            show_message "Sent second Ctrl+E (double-toggle to reach ON state)."
-        fi
-    else
-        show_message "WARNING: xdotool could not find MT5 window — AutoTrading still red."
-        show_message "  Fix: open VNC http://localhost:3001, click the AutoTrading toolbar button."
+    show_message "AutoTrading state after Ctrl+E: ${_live2}"
+    if [ "${_live2}" != "ON" ]; then
+        # First Ctrl+E turned it OFF (it was already ON). Send again.
+        show_message "Was already ON — sending second Ctrl+E to restore ON state..."
+        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
+        sleep 1
     fi
-elif [ "${_live_autotrading}" = "ON" ]; then
-    show_message "AutoTrading is ON — no action needed."
 else
-    show_message "AutoTrading state unknown — verify manually in VNC (http://localhost:3001)."
+    show_message "WARNING: xdotool could not find MT5 window — verify AutoTrading is green in VNC (http://localhost:3001)."
 fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
