@@ -374,7 +374,13 @@ fi
 # overwrites terminal.ini on exit, so we re-apply before every launch.
 _patch_terminal_ini() {
     local _ini="${MT5_CONFIG_DIR}/terminal.ini"
-    [ -f "${_ini}" ] || return 0
+    # Create a minimal terminal.ini if it doesn't exist yet so we don't skip the patch.
+    if [ ! -f "${_ini}" ]; then
+        mkdir -p "${MT5_CONFIG_DIR}"
+        printf '[Common]\r\nExpertAdvisors=1\r\n\r\n[Expert]\r\nAllowDll=1\r\nAllowLive=1\r\nAllowImport=1\r\n' > "${_ini}"
+        show_message "terminal.ini did not exist — created with AutoTrading enabled."
+        return 0
+    fi
     python3 - "${_ini}" <<'_PATCH_PYEOF'
 import sys
 path = sys.argv[1]
@@ -496,6 +502,31 @@ _empty_default_profile() {
 # Launch MT5 so it auto-attaches the EA via [StartUp]. Direct `wine <exe>`
 # (NOT `start /unix`) so the /config: argument reaches terminal64.exe intact.
 _launch_mt5() {
+    # Capture the ExpertAdvisors value from terminal.ini BEFORE we patch it so
+    # the post-IPC-probe block knows whether AutoTrading was off at boot (and
+    # needs a live Ctrl+E toggle).
+    _capture_ea_state() {
+        local _ini="${MT5_CONFIG_DIR}/terminal.ini"
+        local _val="1"
+        if [ -f "${_ini}" ]; then
+            _val=$(python3 -c "
+import sys
+data = open('${_ini}','rb').read()
+if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+    text = data.decode('utf-16-le', errors='replace')
+else:
+    text = data.decode('utf-8', errors='replace')
+for line in text.splitlines():
+    s = line.strip()
+    if s.startswith('ExpertAdvisors='):
+        print(s.split('=',1)[1])
+        sys.exit(0)
+print('1')
+" 2>/dev/null || echo "1")
+        fi
+        echo "${_val}" > /tmp/_mt5_autotrading_before
+    }
+    _capture_ea_state
     _write_startup_ini
     _patch_terminal_ini
     _empty_default_profile
@@ -859,6 +890,78 @@ if [ ${_probe_wait} -ge ${_probe_timeout} ]; then
     show_message "MT5 IPC probe timed out after ${_probe_timeout}s — starting bot anyway."
     show_message "  If you see repeated 'IPC timeout', MT5 likely isn't logging in:"
     show_message "  open VNC (http://localhost:3001) and confirm the terminal is connected."
+fi
+
+# ── Re-patch terminal.ini + enable AutoTrading button live ────────
+# MT5 may have overwritten terminal.ini during startup with its saved state
+# (ExpertAdvisors=0 from a previous session where the button was off).
+# We re-patch here, AFTER MT5 has finished initializing, so the file on disk
+# is correct for the NEXT restart.  For the CURRENT session we also send
+# Ctrl+E via xdotool to toggle the AutoTrading button ON if it's currently
+# off — the keyboard shortcut works regardless of what's on disk.
+show_message "Re-patching terminal.ini after MT5 init (AutoTrading persistence fix)..."
+_patch_terminal_ini
+
+# Read back what terminal.ini actually says now to decide if we need to
+# toggle the live button.  The file was just rewritten by _patch_terminal_ini,
+# so ExpertAdvisors=1 if MT5 had overwritten it to 0 (the problematic case).
+# We use xdotool Ctrl+E ONLY when we detect AutoTrading was off (avoid
+# accidentally toggling it OFF when it was already on).
+_post_patch_ea=$(python3 -c "
+import sys
+path = '${MT5_CONFIG_DIR}/terminal.ini'
+try:
+    data = open(path, 'rb').read()
+    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        text = data.decode('utf-16-le', errors='replace')
+    else:
+        text = data.decode('utf-8', errors='replace')
+    # Read the ORIGINAL value before our patch to know the live state
+    # (we can't tell from the post-patch file since we just set it to 1).
+    # Instead, check: was there any ExpertAdvisors=0 in the file before we
+    # patched?  We can't tell now.  Safest: always send Ctrl+E once and let
+    # MT5 toggle — BUT only if the global button is currently off.
+    # We check by reading the raw file for the patched line.
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith('ExpertAdvisors='):
+            print(s.split('=', 1)[1])
+            sys.exit(0)
+except Exception as e:
+    pass
+print('1')
+" 2>/dev/null || echo "1")
+
+# Regardless of the file value, use xdotool to ensure the live MT5
+# AutoTrading button is ON. We send Ctrl+E ONCE to toggle; if MT5 started
+# with the button ON this would turn it OFF, so we first detect the live
+# state by checking the MT5 journal for the toggle event, and only act if
+# it appears to be OFF. Safest approach: check terminal.ini BEFORE our
+# post-patch (via _pre_patch capture below).
+# Simplification: we pre-read terminal.ini in _launch_mt5 to capture the
+# "as-MT5-left-it" value and store it in a tmpfile, then compare here.
+_autotrading_before="/tmp/_mt5_autotrading_before"
+_ea_was_off=0
+if [ -f "${_autotrading_before}" ]; then
+    _before_val=$(cat "${_autotrading_before}" 2>/dev/null || echo "1")
+    if [ "${_before_val}" = "0" ]; then
+        _ea_was_off=1
+    fi
+    rm -f "${_autotrading_before}"
+fi
+
+if [ "${_ea_was_off}" -eq 1 ]; then
+    show_message "AutoTrading was OFF at startup — sending Ctrl+E to MT5 to enable it..."
+    _mt5_win=$(DISPLAY=:1 xdotool search --name "MetaTrader" 2>/dev/null | head -1 || true)
+    if [ -n "${_mt5_win}" ]; then
+        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null && \
+            show_message "AutoTrading Ctrl+E sent to MT5 window (should now be green)." || \
+            show_message "xdotool key send failed — check AutoTrading manually in VNC."
+    else
+        show_message "WARNING: xdotool could not find MT5 window — verify AutoTrading is green in VNC."
+    fi
+else
+    show_message "AutoTrading was ON at startup (or state unknown) — no toggle needed."
 fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
