@@ -975,16 +975,21 @@ print('ON' if info and info.trade_expert == 1 else 'OFF')
 " 2>/dev/null || echo "UNKNOWN")
 show_message "Live MT5 AutoTrading state: ${_live_autotrading}"
 
-# Always send Ctrl+E regardless of detected state — if already ON it
-# toggles OFF then we send a second one to get back to ON; if OFF it
-# becomes ON in one shot.  This guarantees we always end on ON.
+# Always send Ctrl+E to ensure AutoTrading ends up ON.
+# Ctrl+E is a toggle, so we verify after each send and retry if needed.
+# Hard cap of 4 attempts to avoid looping indefinitely.
 _mt5_win=$(DISPLAY=:1 xdotool search --name "MetaTrader" 2>/dev/null | head -1 || true)
 if [ -n "${_mt5_win}" ]; then
-    show_message "Sending Ctrl+E to MT5 (ensure AutoTrading is ON)..."
-    DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
-    sleep 2
-    _live2=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
-        $wine_executable python -c "
+    _at_attempts=0
+    _at_max=4
+    _at_state="UNKNOWN"
+    while [ ${_at_attempts} -lt ${_at_max} ]; do
+        _at_attempts=$((_at_attempts + 1))
+        show_message "AutoTrading Ctrl+E attempt ${_at_attempts}/${_at_max}..."
+        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
+        sleep 2
+        _at_state=$(DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+            $wine_executable python -c "
 import MetaTrader5 as mt5, sys
 if not mt5.initialize():
     print('UNKNOWN'); sys.exit(0)
@@ -992,15 +997,19 @@ info = mt5.terminal_info()
 mt5.shutdown()
 print('ON' if info and info.trade_expert == 1 else 'OFF')
 " 2>/dev/null || echo "UNKNOWN")
-    show_message "AutoTrading state after Ctrl+E: ${_live2}"
-    if [ "${_live2}" != "ON" ]; then
-        # First Ctrl+E turned it OFF (it was already ON). Send again.
-        show_message "Was already ON — sending second Ctrl+E to restore ON state..."
-        DISPLAY=:1 xdotool key --window "${_mt5_win}" ctrl+e 2>/dev/null
-        sleep 1
+        show_message "AutoTrading state after attempt ${_at_attempts}: ${_at_state}"
+        if [ "${_at_state}" = "ON" ]; then
+            show_message "AutoTrading confirmed ON after ${_at_attempts} attempt(s)."
+            break
+        fi
+    done
+    if [ "${_at_state}" != "ON" ]; then
+        show_message "ERROR: AutoTrading could not be enabled after ${_at_max} attempts (state=${_at_state})."
+        show_message "  Manual fix: open VNC http://localhost:3001 and click the AutoTrading toolbar button."
     fi
 else
-    show_message "WARNING: xdotool could not find MT5 window — verify AutoTrading is green in VNC (http://localhost:3001)."
+    show_message "WARNING: xdotool could not find MT5 window — AutoTrading state unverified."
+    show_message "  Manual fix: open VNC http://localhost:3001 and verify AutoTrading is green."
 fi
 
 # ── Graceful shutdown so MT5 PERSISTS its chart + attached EA ─────
