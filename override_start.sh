@@ -477,12 +477,14 @@ _write_startup_ini() {
     # [Experts] turns the global AutoTrading button ON; [StartUp] opens a
     # GBPUSD H1 chart and attaches ZoneBotBridge with its (correct) default
     # inputs. CRLF line endings as MT5 expects.
+    # IMPORTANT: MT5 ini files use integer booleans (1/0), NOT string "true"/"false".
+    # Using "true" causes MT5 to treat the value as 0 (disabled) — AutoTrading stays red.
     {
         printf '[Experts]\r\n'
-        printf 'AllowLiveTrading=true\r\n'
-        printf 'Enabled=true\r\n'
-        printf 'Account=false\r\n'
-        printf 'Profile=false\r\n'
+        printf 'AllowLiveTrading=1\r\n'
+        printf 'Enabled=1\r\n'
+        printf 'Account=0\r\n'
+        printf 'Profile=0\r\n'
         printf '[StartUp]\r\n'
         printf 'Expert=ZoneBotBridge\r\n'
         printf 'Symbol=GBPUSD\r\n'
@@ -948,6 +950,31 @@ _journal_state=$(echo "${_journal_out}" | grep '^STATE:' | cut -d: -f2)
 show_message "AutoTrading state from journal: ${_journal_state}"
 
 # ── Find the MT5 X11 window ────────────────────────────────────────
+# KasmVNC's Xvnc server requires the correct XAUTHORITY cookie — without it
+# xdotool silently returns no results. Discover and export the cookie file.
+_xauth_file=""
+for _xauth_candidate in \
+        /tmp/.Xauthority \
+        "${HOME}/.Xauthority" \
+        /home/abc/.Xauthority \
+        /root/.Xauthority \
+        /config/.Xauthority; do
+    if [ -f "${_xauth_candidate}" ]; then
+        _xauth_file="${_xauth_candidate}"
+        break
+    fi
+done
+# Also search /tmp for any .Xauthority-style file (KasmVNC may use a random path)
+if [ -z "${_xauth_file}" ]; then
+    _xauth_file=$(ls /tmp/.Xauth* /tmp/.xauth* 2>/dev/null | head -1 || true)
+fi
+if [ -n "${_xauth_file}" ]; then
+    export XAUTHORITY="${_xauth_file}"
+    show_message "Using XAUTHORITY=${_xauth_file} for xdotool."
+else
+    show_message "WARNING: no XAUTHORITY file found — xdotool may fail on KasmVNC."
+fi
+
 # Wait up to 30s for the window to appear, try multiple patterns.
 _mt5_win=""
 show_message "Searching for MT5 X11 window (up to 30s)..."
@@ -976,9 +1003,10 @@ while [ -z "${_mt5_win}" ] && [ ${_win_elapsed} -lt 30 ]; do
 done
 
 if [ -z "${_mt5_win}" ]; then
-    # Diagnostic: list every visible window so we know the exact title to match next time
+    # Diagnostic: list every visible window (errors shown — no 2>/dev/null) so we
+    # can see if xdotool itself is failing or simply finds no matching windows.
     show_message "WARNING: MT5 window not found after ${_win_elapsed}s. All visible X11 windows:"
-    DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>/dev/null | head -30 | \
+    DISPLAY=:1 xdotool search --onlyvisible --name ".*" 2>&1 | head -30 | \
         while read -r _wid; do
             _wn=$(DISPLAY=:1 xdotool getwindowname "${_wid}" 2>/dev/null || true)
             _wc=$(DISPLAY=:1 xdotool getwindowclassname "${_wid}" 2>/dev/null || true)
