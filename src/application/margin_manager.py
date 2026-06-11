@@ -91,31 +91,40 @@ class MarginManager:
         open_count  = len(open_states)
 
         # ── 1. Hard maximum simultaneous open trades ──────────────────
-        max_trades = getattr(config, "SCALPER_MAX_OPEN_TRADES", 3)
+        # Total cap = SCALPER_MAX_OPEN_TRADES (default 5).
+        # Slots 1..SCALPER_A_ONLY_THRESHOLD: any grade allowed.
+        # Slots above threshold: A-grade only — premium slots reserved for
+        # the strongest setups so capital is never tied up in mediocre trades
+        # while a high-conviction entry is waiting.
+        max_trades       = getattr(config, "SCALPER_MAX_OPEN_TRADES", 5)
+        a_only_threshold = getattr(config, "SCALPER_A_ONLY_THRESHOLD", 3)
+
         if max_trades > 0 and open_count >= max_trades:
             return False, (
                 f"MAX_OPEN={max_trades} — {open_count} trades already open | "
                 f"new grade={grade} waits for a natural slot"
             )
 
-        # ── 2. Per-symbol limit ───────────────────────────────────────
-        # Default: only 1 open trade per symbol at a time.
-        max_per_sym = getattr(config, "MAX_TRADES_PER_SYMBOL", 1)
-        sym_open    = sum(1 for s in open_states.values() if s.symbol == symbol)
-        if sym_open >= max_per_sym:
+        if open_count >= a_only_threshold and grade != "A":
             return False, (
-                f"MAX_PER_SYMBOL={max_per_sym} — {symbol} already has {sym_open} open"
+                f"A_ONLY_SLOTS: {open_count} trades open (threshold={a_only_threshold}) — "
+                f"grade={grade} blocked; slots {a_only_threshold+1}–{max_trades} reserved for A-grade only"
             )
 
-        # ── 3. Soft capacity: block C-grade trades when slots are filling up ─
-        # When open_count ≥ SCALPER_SOFT_CAPACITY, we save the remaining
-        # slot(s) for A/B quality setups.  C-grade trades can still enter
-        # when below soft capacity.
-        soft_cap = getattr(config, "SCALPER_SOFT_CAPACITY", 2)
-        if open_count >= soft_cap and grade == "C":
+        # ── 2. Per-symbol limit ───────────────────────────────────────
+        # A-grade setups: up to MAX_TRADES_PER_SYMBOL_A simultaneous (default 3).
+        # B/C/D setups:   always capped at 1 per symbol.
+        # Rationale: only pyramid into a symbol when the setup is exceptional;
+        # never stack mediocre trades on the same instrument.
+        if grade == "A":
+            max_per_sym = getattr(config, "MAX_TRADES_PER_SYMBOL_A", 3)
+        else:
+            max_per_sym = 1
+        sym_open = sum(1 for s in open_states.values() if s.symbol == symbol)
+        if sym_open >= max_per_sym:
             return False, (
-                f"SOFT_CAPACITY={soft_cap} reached ({open_count} open) — "
-                f"grade=C blocked; reserving slot for A/B setup"
+                f"MAX_PER_SYMBOL: {symbol} already has {sym_open} open "
+                f"(max={max_per_sym} for grade={grade})"
             )
 
         # ── 4. Equity reserve floor ───────────────────────────────────
