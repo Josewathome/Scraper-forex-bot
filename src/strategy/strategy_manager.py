@@ -104,6 +104,9 @@ class StrategyManager:
         self._structure: Dict[str, StructureStateManager]  = {}
         self._candle     = LiveCandleAnalyzer()
 
+        from src.strategy.entry_context import EntryContextScorer
+        self._entry_ctx = EntryContextScorer()
+
         for sym in symbols:
             self._mtf[sym]       = ScalperAlignmentEngine(sym)
             self._structure[sym] = StructureStateManager(sym)
@@ -190,25 +193,16 @@ class StrategyManager:
             alignment.m5_slope,
         )
 
-        min_score = self.MIN_ALIGNMENT_SCORE
-        if alignment.score < min_score:
-            logger.info(
-                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f | dir=%s",
-                symbol, alignment.score, min_score,
-                alignment.details.get("m1_dir", "NONE"),
-            )
-            return None
+        # ── Build entry context (pre-tick — uses alignment signals) ──────
+        # We need a direction guess for the tick analyzer before the context
+        # scorer runs. Use M1 direction as the primary direction hint; if M1
+        # has no direction we fall back to M5.
+        m1_dir_str = alignment.details.get("m1_dir", "NONE")
+        m5_dir_str = alignment.details.get("m5_dir", "NONE")
+        pre_direction_str = m1_dir_str if m1_dir_str not in ("NONE", None) else m5_dir_str
+        pre_dir_int = 1 if pre_direction_str == "bullish" else -1
 
-        # ── Gate 2: Consensus direction ───────────────────────────────
-        if alignment.direction is None:
-            logger.info("GATE2 BLOCK [%s] no consensus direction (M1/M5 split)", symbol)
-            return None
-
-        direction = alignment.direction
-        dir_int = 1 if direction == Direction.BULLISH else -1
-
-        # ── Gate 3: Spread check ──────────────────────────────────────
-        tick_result = tick.analyze(direction=dir_int)
+        tick_result = tick.analyze(direction=pre_dir_int)
 
         logger.info(
             "TICK  [%s] score=%.2f vel=%.1f accel=%.2f imbal=%.2f disp=%+.5f spread=%s burst=%.2f",
@@ -234,15 +228,75 @@ class StrategyManager:
             )
             return None
 
-        # ── Gate 5: Tick composite score ──────────────────────────────
-        if tick_result.score < self.MIN_TICK_SCORE:
+        # ── Entry context: reason about market state, derive thresholds ─
+        # All gate thresholds from here are determined by the context scorer,
+        # not hardcoded constants. The scorer classifies the market state into
+        # named flags and explains every threshold adaptation it applies.
+        m1_struct_state = None
+        _struct = self._structure.get(symbol)
+        if _struct is not None:
+            try:
+                m1_struct_state = _struct.state.value if hasattr(_struct.state, "value") else str(_struct.state)
+            except Exception:
+                pass
+
+        entry_ctx = self._entry_ctx.score(
+            m1_score       = alignment.m1_score,
+            m1_direction   = m1_dir_str if m1_dir_str not in ("NONE", None) else None,
+            m5_score       = alignment.m5_score,
+            m5_direction   = m5_dir_str if m5_dir_str not in ("NONE", None) else None,
+            m5_slope       = alignment.m5_slope,
+            m1_structure   = m1_struct_state,
+            tick_score     = tick_result.score,
+            tick_imbalance = tick_result.imbalance,
+            tick_velocity  = tick_result.velocity,
+            tick_burst     = tick_result.burst,
+            candle_score   = 0.0,          # not yet computed — candle scored below
+            elapsed_seconds= elapsed_m1_secs,
+            bar_seconds    = 60.0,
+        )
+
+        logger.info("ENTRY_CTX [%s] %s", symbol, entry_ctx.summary())
+        for r in entry_ctx.reasoning:
+            logger.debug("ENTRY_CTX [%s]   → %s", symbol, r)
+
+        # ── Gate 1: Alignment score (context-adapted threshold) ────────
+        if alignment.score < entry_ctx.effective_align_threshold:
             logger.info(
-                "GATE5 BLOCK [%s] tick_score=%.3f < %.2f — momentum not confirmed",
-                symbol, tick_result.score, self.MIN_TICK_SCORE,
+                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f | dir=%s",
+                symbol, alignment.score, entry_ctx.effective_align_threshold,
+                alignment.details.get("m1_dir", "NONE"),
             )
             return None
 
-        # ── Gate 6: Candle progress score ─────────────────────────────
+        # ── Gate 2: Consensus direction ───────────────────────────────
+        if alignment.direction is None:
+            logger.info("GATE2 BLOCK [%s] no consensus direction (M1/M5 split)", symbol)
+            return None
+
+        direction = alignment.direction
+        dir_int = 1 if direction == Direction.BULLISH else -1
+
+        # Re-analyze ticks with confirmed direction (may differ from pre-direction guess)
+        if dir_int != pre_dir_int:
+            tick_result = tick.analyze(direction=dir_int)
+            logger.info(
+                "TICK  [%s] score=%.2f vel=%.1f accel=%.2f imbal=%.2f disp=%+.5f spread=%s burst=%.2f (re-analyzed)",
+                symbol,
+                tick_result.score, tick_result.velocity, tick_result.acceleration,
+                tick_result.imbalance, tick_result.displacement,
+                tick_result.spread_state.value, tick_result.burst,
+            )
+
+        # ── Gate 5: Tick composite score (context-adapted threshold) ──
+        if tick_result.score < entry_ctx.effective_tick_threshold:
+            logger.info(
+                "GATE5 BLOCK [%s] tick_score=%.3f < %.2f — momentum not confirmed",
+                symbol, tick_result.score, entry_ctx.effective_tick_threshold,
+            )
+            return None
+
+        # ── Gate 6: Candle progress score (context-adapted threshold) ─
         if forming_m1 is None:
             logger.info("GATE6 BLOCK [%s] no forming M1 candle yet", symbol)
             return None
@@ -251,23 +305,22 @@ class StrategyManager:
             forming_candle=forming_m1,
             tick_imbalance=tick_result.imbalance,
             elapsed_seconds=elapsed_m1_secs,
-            bar_seconds=60,   # M1 = 60 seconds
+            bar_seconds=60,
         )
 
+        body_str = "BULL" if candle_result.body_direction > 0 else "BEAR" if candle_result.body_direction < 0 else "DOJI"
         logger.info(
-            "CANDLE[%s] score=%+.3f body=%s wick_pressure=%+.3f tick_bias=%+.3f elapsed=%.0fs",
-            symbol,
-            candle_result.score,
-            "BULL" if candle_result.body_direction > 0 else "BEAR" if candle_result.body_direction < 0 else "DOJI",
-            candle_result.wick_pressure,
-            candle_result.tick_bias,
-            elapsed_m1_secs,
+            "CANDLE[%s] score=%+.3f body=%s wick_pressure=%+.3f tick_bias=%+.3f elapsed=%.0fs "
+            "| candle_thresh=%.3f",
+            symbol, candle_result.score, body_str,
+            candle_result.wick_pressure, candle_result.tick_bias, elapsed_m1_secs,
+            entry_ctx.effective_candle_threshold,
         )
 
-        if abs(candle_result.score) < self.MIN_CANDLE_SCORE_ABS:
+        if abs(candle_result.score) < entry_ctx.effective_candle_threshold:
             logger.info(
-                "GATE6 BLOCK [%s] candle_score=%.3f < %.2f — candle too weak",
-                symbol, abs(candle_result.score), self.MIN_CANDLE_SCORE_ABS,
+                "GATE6 BLOCK [%s] candle_score=%.3f < %.3f — candle too weak",
+                symbol, abs(candle_result.score), entry_ctx.effective_candle_threshold,
             )
             return None
 
@@ -276,8 +329,7 @@ class StrategyManager:
            (direction == Direction.BEARISH and candle_result.score > 0):
             logger.info(
                 "GATE6 BLOCK [%s] candle direction CONFLICTS — structure=%s candle=%s",
-                symbol,
-                direction.value,
+                symbol, direction.value,
                 "BEAR" if candle_result.score < 0 else "BULL",
             )
             return None

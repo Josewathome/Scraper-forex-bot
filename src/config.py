@@ -301,6 +301,11 @@ SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT
 SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.20"))  # relaxed from 0.55 — tick formula scores 0.06-0.29 under normal conditions; alignment gate already filters quality
 SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))  # relaxed from 0.30
 
+# Entry context scorer — thresholds for autonomous gate adaptation
+ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
+ENTRY_TICK_CONFIRMS_MIN_BIAS:  float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_BIAS",  "0.20"))
+ENTRY_BURST_MOVE_THRESHOLD:    float = float(os.environ.get("ENTRY_BURST_MOVE_THRESHOLD",    "0.40"))
+
 SCALPER_M5_EMA_PERIOD: int = int(os.environ.get("SCALPER_M5_EMA_PERIOD", "10"))
 
 SCALPER_M1_CONSENSUS_MIN: int = int(os.environ.get("SCALPER_M1_CONSENSUS_MIN", "3"))
