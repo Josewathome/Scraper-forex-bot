@@ -152,6 +152,7 @@ class ScalperAlignmentEngine:
             "m1_score":    f"{m1_score:.2f}",
             "m1_dir":      m1_direction.value if m1_direction else "NONE",
             "m5_score":    f"{m5_score:.2f}",
+            "m5_dir":      m5_direction.value if m5_direction else "NONE",
             "m5_ema":      f"{m5_ema:.5f}",
             "m5_slope":    f"{m5_slope:+.6f}",
             "m1_detail":   str(m1_consensus),
