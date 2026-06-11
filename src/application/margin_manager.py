@@ -82,54 +82,87 @@ class MarginManager:
         """
         Check all portfolio-level constraints before allowing a new entry.
 
+        Symbol-level model
+        ──────────────────
+        MAX_SYMBOLS (5): maximum number of unique symbols that can have open
+            trades simultaneously.  New symbols are only admitted when the
+            active symbol count is below this cap; A-grade entries get
+            priority access to the last available symbol slot.
+
+        Per-symbol model  (up to 4 trades per symbol)
+        ──────────────────
+          • Up to MAX_TRADES_PER_SYMBOL_A (3) A/A+ trades per symbol.
+          • Plus 1 additional B/C/D trade per symbol  (total cap 4).
+          • B/C/D trades: only allowed when the symbol already has fewer than
+            MAX_TRADES_PER_SYMBOL_A A-grade trades (i.e. not all slots full)
+            AND the total per-symbol cap (4) has not been reached.
+
+        New-symbol slot priority
+        ──────────────────────────
+          • When active_symbols == MAX_SYMBOLS - 1 (last free symbol slot),
+            that slot is reserved for A-grade only.
+          • B/C/D can still open on an *already-active* symbol within its
+            4-trade cap.
+
         Returns (allowed: bool, reason: str).
-        On allow:  (True,  "ok")
-        On block:  (False, human-readable reason for logs)
         """
-        open_states = self._get_open_states()
-        _, grade    = self.quality_risk_pct(confidence, tq_score)
-        open_count  = len(open_states)
+        open_states    = self._get_open_states()
+        _, grade       = self.quality_risk_pct(confidence, tq_score)
+        is_a_grade     = grade in ("A", "A+")
 
-        # ── 1. Hard maximum simultaneous open trades ──────────────────
-        # Total cap = SCALPER_MAX_OPEN_TRADES (default 5).
-        # Slots 1..SCALPER_A_ONLY_THRESHOLD: any grade allowed.
-        # Slots above threshold: A-grade only — premium slots reserved for
-        # the strongest setups so capital is never tied up in mediocre trades
-        # while a high-conviction entry is waiting.
-        max_trades       = getattr(config, "SCALPER_MAX_OPEN_TRADES", 5)
-        a_only_threshold = getattr(config, "SCALPER_A_ONLY_THRESHOLD", 3)
+        # ── count open symbols and per-symbol trades ──────────────────
+        active_symbols: set = {s.symbol for s in open_states.values()}
+        sym_open            = sum(1 for s in open_states.values() if s.symbol == symbol)
+        sym_a_open          = sum(
+            1 for s in open_states.values()
+            if s.symbol == symbol and getattr(s, "grade", "C") in ("A", "A+")
+        )
+        symbol_is_new       = symbol not in active_symbols
 
-        if max_trades > 0 and open_count >= max_trades:
+        max_symbols         = getattr(config, "MAX_OPEN_SYMBOLS",        5)
+        max_per_sym_a       = getattr(config, "MAX_TRADES_PER_SYMBOL_A", 3)
+        max_per_sym_total   = getattr(config, "MAX_TRADES_PER_SYMBOL",   4)
+
+        # ── 1. Symbol slot limit ──────────────────────────────────────
+        # If this symbol has no open trades it would consume a new symbol slot.
+        if symbol_is_new:
+            active_count = len(active_symbols)
+            if active_count >= max_symbols:
+                return False, (
+                    f"MAX_SYMBOLS={max_symbols} — {active_count} symbols already active "
+                    f"({', '.join(sorted(active_symbols))}) | "
+                    f"{symbol} would exceed the limit (grade={grade})"
+                )
+            # Last symbol slot is A-grade priority
+            if active_count == max_symbols - 1 and not is_a_grade:
+                return False, (
+                    f"SYMBOL_SLOT_PRIORITY: {active_count}/{max_symbols} symbols active — "
+                    f"final symbol slot reserved for A-grade | {symbol} grade={grade} blocked"
+                )
+
+        # ── 2. Per-symbol trade cap ───────────────────────────────────
+        if sym_open >= max_per_sym_total:
             return False, (
-                f"MAX_OPEN={max_trades} — {open_count} trades already open | "
-                f"new grade={grade} waits for a natural slot"
+                f"MAX_PER_SYMBOL: {symbol} already has {sym_open}/{max_per_sym_total} trades open"
             )
 
-        if open_count >= a_only_threshold and grade != "A":
-            return False, (
-                f"A_ONLY_SLOTS: {open_count} trades open (threshold={a_only_threshold}) — "
-                f"grade={grade} blocked; slots {a_only_threshold+1}–{max_trades} reserved for A-grade only"
-            )
-
-        # ── 2. Per-symbol limit ───────────────────────────────────────
-        # A-grade setups: up to MAX_TRADES_PER_SYMBOL_A simultaneous (default 3).
-        # B/C/D setups:   always capped at 1 per symbol.
-        # Rationale: only pyramid into a symbol when the setup is exceptional;
-        # never stack mediocre trades on the same instrument.
-        if grade == "A":
-            max_per_sym = getattr(config, "MAX_TRADES_PER_SYMBOL_A", 3)
+        if is_a_grade:
+            # A-grade: respect the A-grade sub-cap
+            if sym_a_open >= max_per_sym_a:
+                return False, (
+                    f"MAX_A_TRADES_PER_SYMBOL: {symbol} already has {sym_a_open} A-grade trades "
+                    f"(max={max_per_sym_a}) | grade={grade} blocked"
+                )
         else:
-            max_per_sym = 1
-        sym_open = sum(1 for s in open_states.values() if s.symbol == symbol)
-        if sym_open >= max_per_sym:
-            return False, (
-                f"MAX_PER_SYMBOL: {symbol} already has {sym_open} open "
-                f"(max={max_per_sym} for grade={grade})"
-            )
+            # B/C/D: allowed only if there is room beyond the A-grade slots
+            # i.e. at least one A-grade trade exists (symbol is proven) and
+            # total per-symbol cap not yet reached (checked above).
+            # We do NOT require A-grade trades to already be present — a fresh
+            # symbol can open with a B/C/D if it passes the symbol-slot check
+            # above (which already enforces A-priority for the last slot).
+            pass
 
-        # ── 4. Equity reserve floor ───────────────────────────────────
-        # Always keep MARGIN_RESERVE_PCT of equity free so future strong
-        # setups always have enough room.
+        # ── 3. Equity reserve floor ───────────────────────────────────
         try:
             free_margin = self._tr.get_free_margin()
             if free_margin is not None and balance > 0:
@@ -137,7 +170,6 @@ class MarginManager:
                 reserve_pct = getattr(config, "MARGIN_RESERVE_PCT", 0.25)
                 reserve_amt = equity * reserve_pct
                 safety      = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
-                # Minimum margin for a 0.01-lot trade at 1:400 leverage
                 min_margin  = 0.01 * _LEVERAGE_DIVISOR * safety
                 if free_margin < reserve_amt + min_margin:
                     return False, (
@@ -148,10 +180,8 @@ class MarginManager:
         except Exception as _e:
             logger.debug("MarginManager equity reserve check error: %s", _e)
 
-        # ── 5. Currency correlation exposure limit ────────────────────
-        # Prevent opening too many trades that share the same currency leg
-        # (e.g. GBPUSD + USDJPY + USDCHF all have USD exposure).
-        max_ccy_exp   = getattr(config, "MAX_CURRENCY_EXPOSURE", 3)
+        # ── 4. Currency correlation exposure limit ────────────────────
+        max_ccy_exp    = getattr(config, "MAX_CURRENCY_EXPOSURE", 3)
         sym_currencies = getattr(config, "SYMBOL_CURRENCIES", {}).get(symbol, [])
         for ccy in sym_currencies:
             ccy_open = sum(

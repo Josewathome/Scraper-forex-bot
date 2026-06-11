@@ -77,8 +77,18 @@ HFM_COMMISSION_USD_DEFAULT: float = 3.0
 RISK_PERCENT        = 2.0
 COMMISSION_PER_LOT  = 3.0  # USD/lot (per side) — default for major pairs
 MIN_RR              = 1.5
-MAX_OPEN_TRADES     = 20   # Soft reference (see SCALPER_MAX_OPEN_TRADES for enforced limit)
-MAX_TRADES_PER_SYMBOL = 1  # legacy; MarginManager now uses MAX_TRADES_PER_SYMBOL_A per-grade
+# Maximum unique symbols that may have open trades simultaneously.
+# A new symbol can only open a trade if active_symbols < MAX_OPEN_SYMBOLS.
+# The final free slot is reserved for A-grade entries.
+MAX_OPEN_SYMBOLS: int = int(os.environ.get("MAX_OPEN_SYMBOLS", "5"))
+
+# Per-symbol trade caps.
+# A/A+ trades: up to MAX_TRADES_PER_SYMBOL_A  (default 3)
+# B/C/D trades: 1 additional slot beyond the A-grade trades (total cap 4)
+# Hard per-symbol ceiling regardless of grade.
+MAX_TRADES_PER_SYMBOL_A:     int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A",   "3"))
+MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "4"))
+
 MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
 
 # ── Margin Safety ────────────────────────────────────────────────
@@ -290,14 +300,10 @@ SCALPER_MAX_HOLD_MINUTES: int = int(os.environ.get("SCALPER_MAX_HOLD_MINUTES", "
 # Set SCALPER_MAX_DAILY_TRADES = 0 to disable the cap entirely.
 SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "0"))
 
-# Hard cap on simultaneous open trades (0 = disabled). Default 5.
-SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "5"))
-# When open_count >= this threshold, only A-grade trades may enter.
-# Slots 1..threshold: any grade. Slots above: A-grade only.
-SCALPER_A_ONLY_THRESHOLD: int = int(os.environ.get("SCALPER_A_ONLY_THRESHOLD", "3"))
-# Max simultaneous trades per symbol for A-grade setups.
-# B/C/D grades are always capped at 1 per symbol regardless.
-MAX_TRADES_PER_SYMBOL_A: int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A", "3"))
+# Kept for legacy env-var compatibility — no longer used by MarginManager.
+# Symbol and per-symbol limits are now controlled by MAX_OPEN_SYMBOLS,
+# MAX_TRADES_PER_SYMBOL, and MAX_TRADES_PER_SYMBOL_A defined above.
+SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "20"))
 
 SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.43"))  # M1-first: 0.65×0.70 = 0.455 → a clear M1 structure break alone clears this
 SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.15"))  # lowered from 0.20 — tick gate is secondary; alignment + structure are primary filters
