@@ -26,9 +26,10 @@ from __future__ import annotations
 import logging
 import math
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional
 
 import src.config as config
 from src.domain.entities import Direction, Timeframe, Trade, TradeSignal, TradeStatus, Candle
@@ -75,6 +76,9 @@ class _OpenTradeState:
     last_reeval_score:  float = 1.0   # most recent continuation score
     reeval_count:       int   = 0     # number of M1-close re-evaluations
     defensive_mode:     bool  = False # True when thesis is weakening
+    # Autonomous recovery tracking
+    cont_score_history: List[float] = field(default_factory=list)   # last 5 cont scores
+    recent_prices:      Deque       = field(default_factory=lambda: deque(maxlen=10))
 
     @property
     def entry_price(self) -> float:
@@ -253,17 +257,64 @@ class ExecutionService:
             state.last_reeval_score = cont
             state.reeval_count     += 1
 
+            # Maintain cont score history for recovery conviction velocity
+            state.cont_score_history.append(cont)
+            if len(state.cont_score_history) > 5:
+                state.cont_score_history = state.cont_score_history[-5:]
+
+            # ── Recovery conviction ────────────────────────────────────
+            # Only compute when thesis is under pressure (cont < HOLD_THRESHOLD).
+            # When thesis is healthy (cont >= HOLD) we hold regardless.
+            recovery = None
+            if cont < HOLD_THRESHOLD and len(state.cont_score_history) >= 2:
+                try:
+                    from src.application.recovery_scorer import compute_recovery_conviction
+                    recovery = compute_recovery_conviction(
+                        direction=trade_dir,
+                        entry=state.entry,
+                        current_sl=state.current_sl,
+                        price=price,
+                        recent_prices=list(state.recent_prices),
+                        cont_score_history=state.cont_score_history,
+                        structure=structure,
+                        m1_candles=m1_candles,
+                        pip_calc=pip_calc,
+                    )
+                except Exception as _exc:
+                    logger.debug("RecoveryConviction compute failed: %s", _exc)
+
             logger.info(
-                "REEVAL [%s] ticket=%s %s | cont=%.2f | in_profit=%s | pr=%+.2fR | "
+                "REEVAL [%s] ticket=%s %s | cont=%.2f | rcv=%.2f | in_profit=%s | pr=%+.2fR | "
                 "mfe=%.1fpips | defensive=%s | #%d",
                 symbol, ticket, trade_dir.value.upper(),
-                cont, in_profit, profit_ratio, mfe_pips,
+                cont, recovery.score if recovery else 1.0,
+                in_profit, profit_ratio, mfe_pips,
                 state.defensive_mode, state.reeval_count,
             )
+            if recovery is not None:
+                logger.debug("RECOVERY_DETAIL [%s] ticket=%s | %s", symbol, ticket, recovery.detail)
 
             # ── Decision matrix ────────────────────────────────────────
+            # Recovery conviction overrides hard thresholds when cont is marginal.
+            # High conviction (≥0.60) = market physics say hold → upgrade decision.
+            # Low conviction (<0.35)  = market moving against us → accelerate exit.
+            rcv_score = recovery.score if recovery is not None else None
 
-            if cont >= HOLD_THRESHOLD:
+            # Dynamically adjust effective thresholds based on recovery conviction
+            eff_hold      = HOLD_THRESHOLD
+            eff_defensive = DEFENSIVE_THRESHOLD
+            eff_exit      = EXIT_THRESHOLD
+            if rcv_score is not None:
+                # High conviction: widen hold window (recovery is likely)
+                if rcv_score >= 0.65:
+                    eff_hold      = max(0.40, HOLD_THRESHOLD      - 0.10)
+                    eff_defensive = max(0.30, DEFENSIVE_THRESHOLD - 0.08)
+                # Low conviction: tighten exit window (cut losses faster)
+                elif rcv_score <= 0.35:
+                    eff_exit      = min(0.40, EXIT_THRESHOLD      + 0.10)
+                    eff_defensive = min(0.55, DEFENSIVE_THRESHOLD + 0.08)
+
+            if cont >= eff_hold:
                 # Thesis intact — clear defensive mode if previously set
                 if state.defensive_mode:
                     logger.info(
@@ -272,12 +323,12 @@ class ExecutionService:
                     )
                     state.defensive_mode = False
 
-            elif cont >= DEFENSIVE_THRESHOLD:
+            elif cont >= eff_defensive:
                 # Thesis weakening — protect profit, tighten SL
                 if not state.defensive_mode:
                     logger.info(
-                        "REEVAL_DEFENSIVE [%s] ticket=%s — cont=%.2f entering defensive mode",
-                        symbol, ticket, cont,
+                        "REEVAL_DEFENSIVE [%s] ticket=%s — cont=%.2f rcv=%.2f entering defensive mode",
+                        symbol, ticket, cont, rcv_score if rcv_score is not None else 1.0,
                     )
                     state.defensive_mode = True
 
@@ -293,7 +344,7 @@ class ExecutionService:
                             )
                             state.current_sl = tight_sl
 
-            elif cont >= EXIT_THRESHOLD:
+            elif cont >= eff_exit:
                 # Thesis degraded — close losing trades outright; partial exit only when in profit
                 if not in_profit and act:
                     live_pips  = (pip_calc.price_to_pips(price - state.entry)
@@ -360,7 +411,12 @@ class ExecutionService:
             #     defensive because the market has already shown weakness.
             effective_reversal_conf = REVERSAL_THRESHOLD
             if state.defensive_mode and not in_profit:
-                effective_reversal_conf = 0.50  # easier to exit when already losing + defensive
+                # Lower reversal threshold when already losing + defensive.
+                # If recovery conviction is also low, lower it further.
+                if rcv_score is not None and rcv_score <= 0.35:
+                    effective_reversal_conf = 0.45  # market physics confirm the reversal
+                else:
+                    effective_reversal_conf = 0.55
 
             # Structural reversal: if M1 BOS has fully confirmed opposite direction,
             # exit without waiting for a fresh signal (struct_score is 0.0 when fully reversed).
@@ -542,6 +598,10 @@ class ExecutionService:
                 self._trade_states[ticket] = state
 
             price = self._md.get_current_price(symbol)
+
+            # Track recent tick prices for recovery conviction scoring
+            if price:
+                state.recent_prices.append(price)
 
             # Update MFE
             if state.direction == Direction.BULLISH:

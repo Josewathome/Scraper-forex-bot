@@ -278,6 +278,40 @@ class StrategyManager:
             )
             return None
 
+        # ── Gate 7: Trade quality score (autonomous entry quality) ───────
+        try:
+            from src.strategy.trade_quality import compute_trade_quality
+            tq = compute_trade_quality(
+                direction=direction,
+                price=current_price,
+                tick_velocity=tick_result.velocity,
+                tick_acceleration=tick_result.acceleration,
+                tick_imbalance=tick_result.imbalance,
+                alignment=alignment,
+                structure=self._structure.get(symbol),
+                m1_candles=m1_candles,
+                m5_candles=h1_candles,  # M5 candles passed via this slot
+            )
+            # Preliminary confidence estimate for dynamic minimum
+            pre_conf = alignment.score * 0.50 + tick_result.score * 0.30 + abs(candle_result.score) * 0.20
+            if not tq.passes_minimum(pre_conf):
+                logger.info(
+                    "GATE7 BLOCK [%s] trade_quality=%.3f < dynamic_min | "
+                    "mom=%.2f struct=%.2f align=%.2f cond=%.2f key_level=%s",
+                    symbol, tq.score,
+                    tq.momentum_score, tq.structural_score,
+                    tq.alignment_score, tq.condition_score, tq.at_key_level,
+                )
+                return None
+            logger.info(
+                "GATE7 PASS [%s] trade_quality=%.3f | mom=%.2f struct=%.2f cond=%.2f key=%s",
+                symbol, tq.score, tq.momentum_score, tq.structural_score,
+                tq.condition_score, tq.at_key_level,
+            )
+        except Exception as _tq_exc:
+            logger.debug("TradeQuality compute failed (non-fatal): %s", _tq_exc)
+            tq = None
+
         # ── All gates passed — build signal ───────────────────────────
         confidence = (
             alignment.score          * 0.50 +
