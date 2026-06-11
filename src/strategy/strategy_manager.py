@@ -44,6 +44,10 @@ class StrategySignal:
     last_swing_support:  Optional[float]   # nearest swing low (for longs)
     last_swing_resistance: Optional[float] # nearest swing high (for shorts)
 
+    # Trade quality score from GATE7 TradeQualityScorer (0.0–1.0).
+    # Used by MarginManager for quality-weighted position sizing.
+    tq_score: float = 0.0
+
     @property
     def is_long(self) -> bool:
         return self.direction == Direction.BULLISH
@@ -341,6 +345,7 @@ class StrategyManager:
             proposed_entry=current_price,
             last_swing_support=last_swing_support.price if last_swing_support else None,
             last_swing_resistance=last_swing_resistance.price if last_swing_resistance else None,
+            tq_score=round(tq.score, 3) if tq is not None else 0.0,
         )
 
         signal.log_summary()

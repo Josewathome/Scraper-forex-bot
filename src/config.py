@@ -77,12 +77,22 @@ HFM_COMMISSION_USD_DEFAULT: float = 3.0
 RISK_PERCENT        = 2.0
 COMMISSION_PER_LOT  = 3.0  # USD/lot (per side) — default for major pairs
 MIN_RR              = 1.5
-MAX_OPEN_TRADES     = 20   # Soft reference — enforced by margin, not a hard gate
-MAX_TRADES_PER_SYMBOL = 10  # Soft reference — no per-symbol hard gate in entry_gate
+MAX_OPEN_TRADES     = 20   # Soft reference (see SCALPER_MAX_OPEN_TRADES for enforced limit)
+MAX_TRADES_PER_SYMBOL = int(os.environ.get("MAX_TRADES_PER_SYMBOL", "1"))  # enforced by MarginManager
 MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
 
 # ── Margin Safety ────────────────────────────────────────────────
 MARGIN_SAFETY_FACTOR: float = 2.0
+
+# ── Portfolio Allocation ──────────────────────────────────────────
+# Always keep this fraction of equity reserved for future strong setups.
+MARGIN_RESERVE_PCT:    float = float(os.environ.get("MARGIN_RESERVE_PCT",     "0.25"))
+# Maximum total open exposure as fraction of equity.
+MAX_EQUITY_EXPOSURE:   float = float(os.environ.get("MAX_EQUITY_EXPOSURE",    "0.60"))
+# Leverage divisor for margin proxy (1:400 → 250.0; 1:500 → 200.0).
+LEVERAGE_MARGIN_DIVISOR: float = float(os.environ.get("LEVERAGE_MARGIN_DIVISOR", "250.0"))
+# Maximum correlated-currency exposure (trades sharing the same currency leg).
+MAX_CURRENCY_EXPOSURE: int   = int(os.environ.get("MAX_CURRENCY_EXPOSURE",    "3"))
 
 # ── SL buffer (pips) ─────────────────────────────────────────────
 EXTRA_PIPS_SL_DEFAULT = 3.0
@@ -158,9 +168,15 @@ MONITOR_TRAIL_ATR_BUFFER = 0.5
 TRADE_SCORE_THRESHOLD   = 2
 
 # ── DYNAMIC POSITION SIZING ───────────────────────────────────────
-RISK_HIGH_CONVICTION    = 1.5
-RISK_MEDIUM_CONVICTION  = 1.0
-RISK_LOW_CONVICTION     = 1.0
+# Quality-weighted risk per grade (now wired via MarginManager):
+#   A+  conf ≥ 0.85 AND tq ≥ 0.75  →  RISK_HIGH_CONVICTION
+#   A   conf ≥ 0.70 OR  tq ≥ 0.65  →  RISK_MEDIUM_CONVICTION
+#   B   conf ≥ 0.60 OR  tq ≥ 0.50  →  RISK_LOW_CONVICTION
+#   C   otherwise                   →  RISK_MIN_CONVICTION
+RISK_HIGH_CONVICTION    = float(os.environ.get("RISK_HIGH_CONVICTION",    "2.5"))
+RISK_MEDIUM_CONVICTION  = float(os.environ.get("RISK_MEDIUM_CONVICTION",  "1.8"))
+RISK_LOW_CONVICTION     = float(os.environ.get("RISK_LOW_CONVICTION",     "1.0"))
+RISK_MIN_CONVICTION     = float(os.environ.get("RISK_MIN_CONVICTION",     "0.5"))
 
 # ── TIME-BASED EXIT ───────────────────────────────────────────────
 MAX_TRADE_DURATION_MINUTES = 600
@@ -274,9 +290,12 @@ SCALPER_MAX_HOLD_MINUTES: int = int(os.environ.get("SCALPER_MAX_HOLD_MINUTES", "
 # Set SCALPER_MAX_DAILY_TRADES = 0 to disable the cap entirely.
 SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "0"))
 
-# No global open-trade cap — margin validation prevents over-exposure.
-# Set SCALPER_MAX_OPEN_TRADES = 0 to disable.
-SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "0"))
+# Hard cap on simultaneous open trades (0 = disabled).
+# Set via SCALPER_MAX_OPEN_TRADES env var. Default 3 for a small account.
+SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "3"))
+# When open_count >= SCALPER_SOFT_CAPACITY, C-grade trades are blocked.
+# Saves the last slot(s) for A/B quality setups.
+SCALPER_SOFT_CAPACITY: int = int(os.environ.get("SCALPER_SOFT_CAPACITY", "2"))
 
 SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))  # relaxed from 0.55 — 0.50 still requires M1+M5 agreement; gives more signals
 SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.20"))  # relaxed from 0.55 — tick formula scores 0.06-0.29 under normal conditions; alignment gate already filters quality

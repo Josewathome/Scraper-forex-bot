@@ -110,12 +110,23 @@ class EntryGate:
         # Analytics: daily trade count (informational only — not a gate)
         self._daily_counts: Dict[str, int] = {}
 
+        # Portfolio-level capital allocation authority
+        from src.application.margin_manager import MarginManager
+        self._margin = MarginManager(
+            trade_repo=execution._tr,
+            execution_service=execution,
+        )
+
     # ── Public API ─────────────────────────────────────────────────
 
     def on_new_day(self, balance: float) -> None:
         self._daily_counts.clear()
-        self._session_start_equity = balance
-        logger.info("EntryGate: new day — equity baseline %.2f", balance)
+        # Use equity (balance + unrealized P&L) as the daily baseline so that
+        # open losing positions are counted in the drawdown check, not just
+        # realized balance which lags until trades close.
+        equity = self._margin.get_equity(balance)
+        self._session_start_equity = equity
+        logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
 
     def record_trade(self) -> None:
         """Increment informational daily counter and record fill time."""
@@ -191,18 +202,36 @@ class EntryGate:
         signal._eval_id = eval_id
 
         # ── Gate 4: Daily drawdown circuit breaker ─────────────────
+        # Use equity (balance + unrealized P&L) so open losing positions
+        # are included in the drawdown calculation, not just realized balance.
         drawdown_limit = getattr(config, "DAILY_DRAWDOWN_LIMIT_PCT", 6.0)
+        current_equity = self._margin.get_equity(balance)
         if (self._session_start_equity is not None and
-                self._session_start_equity > 0 and balance < self._session_start_equity):
-            dd_pct = (self._session_start_equity - balance) / self._session_start_equity * 100
+                self._session_start_equity > 0 and
+                current_equity < self._session_start_equity):
+            dd_pct = (self._session_start_equity - current_equity) / self._session_start_equity * 100
             if dd_pct >= drawdown_limit:
                 logger.warning(
-                    "ENTRY_GATE_BLOCK [%s] %s: dd=%.2f%% >= %.2f%% — circuit breaker",
+                    "ENTRY_GATE_BLOCK [%s] %s: equity_dd=%.2f%% >= %.2f%% — circuit breaker "
+                    "(equity=%.2f vs baseline=%.2f)",
                     sym, GateBlockReason.DRAWDOWN, dd_pct, drawdown_limit,
+                    current_equity, self._session_start_equity,
                 )
                 return None
 
-        # ── Gate 5: Margin validation ──────────────────────────────
+        # ── Gate 5: Portfolio-level allocation check ───────────────
+        # Enforces: max open trades, per-symbol limit, soft-capacity
+        # C-grade blocking, equity reserve floor, currency exposure.
+        tq_score = getattr(signal, "tq_score", 0.0)
+        allowed, mm_reason = self._margin.can_enter(
+            symbol=sym, confidence=signal.confidence,
+            tq_score=tq_score, balance=balance,
+        )
+        if not allowed:
+            logger.info("ENTRY_GATE_BLOCK [%s] PORTFOLIO_LIMIT | %s", sym, mm_reason)
+            return None
+
+        # ── Gate 6 (old Gate 5): Margin validation ─────────────────
         if not self._margin_ok(sym, balance, pip_calc, tick_value, signal, broker_cost):
             logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.MARGIN)
             return None
@@ -280,14 +309,14 @@ class EntryGate:
             timeframe=   Timeframe.M1,
         )
 
-        confidence = signal.confidence
+        confidence  = signal.confidence
+        tq_score    = getattr(signal, "tq_score", 0.0)
         setup_score = int(confidence * 100)
-        if confidence >= 0.85:
-            grade = "A"
-        elif confidence >= 0.70:
-            grade = "B"
-        else:
-            grade = "C"
+
+        # Quality-weighted risk: better setups risk more, weaker setups risk less.
+        # This is what the RISK_HIGH/MEDIUM/LOW_CONVICTION config values were
+        # always intended for — they are now wired here via MarginManager.
+        risk_pct, grade = self._margin.quality_risk_pct(confidence, tq_score)
 
         try:
             from src.application.execution_service import EntryCandidate
@@ -301,7 +330,7 @@ class EntryGate:
             setup_score= setup_score,
             trade_score= setup_score,
             grade=       grade,
-            risk_pct=    config.RISK_PERCENT,
+            risk_pct=    risk_pct,
             tp1_price=   tp1_price,
             tp2_price=   tp2_price,
             broker_cost= broker_cost,
@@ -312,9 +341,10 @@ class EntryGate:
         )
 
         logger.info(
-            "ENTRY_GATE_PASS [%s] %s | conf=%.2f | grade=%s | "
+            "ENTRY_GATE_PASS [%s] %s | conf=%.2f tq=%.2f | grade=%s risk=%.1f%% | "
             "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.1f | daily_count=%d",
-            sym, signal.direction.value.upper(), confidence, grade,
+            sym, signal.direction.value.upper(), confidence, tq_score,
+            grade, risk_pct,
             current_price, sl_price, tp1_price, tp2_price,
             sl_dist_pips, tp1_rr,
             self.daily_trade_count(),
@@ -375,18 +405,17 @@ class EntryGate:
             raw_lots = risk_usd / (sl_pips_approx * pip_val) if pip_val > 0 else 0.01
             lots     = max(0.01, round(raw_lots, 2))
 
-            # Approximate required margin: lots × contract_size × price / leverage
-            # IC Markets standard leverage is 1:500 on forex pairs.
-            # lots × 100,000 / 500 = lots × 200.  Previous value (lots × 1000)
-            # assumed 1:100 leverage and falsely blocked all trades on small accounts.
+            # Approximate required margin: lots × LEVERAGE_MARGIN_DIVISOR.
+            # Account leverage is 1:400 → lots × 250.0.
             # MT5 enforces the exact figure at execution; this is a pre-flight gate only.
-            req_margin_proxy = lots * 200.0
-            safety_floor = getattr(config, "MARGIN_SAFETY_FACTOR", 1.5)
+            _ldiv = getattr(config, "LEVERAGE_MARGIN_DIVISOR", 250.0)
+            req_margin_proxy = lots * _ldiv
+            safety_floor = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
             if req_margin_proxy * safety_floor > free_margin:
                 # Risk-based lots don't fit — check if minimum 0.01 lots is affordable.
                 # If yes, allow: _build_trade will cap the lot size to fit the margin.
                 # Only block if even 0.01 lots × safety exceeds free margin.
-                min_req = 0.01 * 200.0 * safety_floor
+                min_req = 0.01 * _ldiv * safety_floor
                 if min_req > free_margin:
                     logger.info(
                         "MARGIN_GATE [%s] free=%.2f req_proxy=%.2f × %.1f = %.2f — insufficient "
