@@ -21,6 +21,84 @@ class MT5TradeRepository(ITradeRepository):
         self._gw = gateway
 
     def place_trade(self, trade: Trade) -> Optional[int]:
+        # ── Pre-flight: validate SL/TP against broker stop level ─────
+        # MT5 rejects orders with "Invalid stops" when SL or TP is closer
+        # to the current market price than the broker's minimum stop distance
+        # (symbol_info.trade_stops_level * point).  This happens because the
+        # signal was computed against the price at signal time but the market
+        # may have moved by the time the order is sent.  We fetch a fresh tick
+        # and nudge SL/TP outward just enough to clear the stop level.
+        sl, tp = trade.stop_loss, trade.take_profit
+        try:
+            info = self._gw.get_symbol_info(trade.symbol)
+            tick = self._gw.get_tick(trade.symbol)
+            if info and tick:
+                point        = info["point"]
+                stops_pts    = info.get("stops_level", 0)
+                min_dist     = stops_pts * point
+                # Use the actual execution price (ask for BUY, bid for SELL)
+                exec_price   = tick["ask"] if trade.direction == Direction.BULLISH else tick["bid"]
+                digits       = info["digits"]
+                is_buy       = trade.direction == Direction.BULLISH
+
+                # SL must be at least min_dist below exec_price (BUY) or above (SELL)
+                if is_buy:
+                    sl_limit = round(exec_price - min_dist, digits)
+                    if sl > sl_limit:
+                        logger.warning(
+                            "SL nudge [%s] BUY: sl=%.5f too close to ask=%.5f "
+                            "(min_dist=%.5f stops_pts=%d) → nudging to %.5f",
+                            trade.symbol, sl, exec_price, min_dist, stops_pts, sl_limit,
+                        )
+                        sl = sl_limit
+                else:
+                    sl_limit = round(exec_price + min_dist, digits)
+                    if sl < sl_limit:
+                        logger.warning(
+                            "SL nudge [%s] SELL: sl=%.5f too close to bid=%.5f "
+                            "(min_dist=%.5f stops_pts=%d) → nudging to %.5f",
+                            trade.symbol, sl, exec_price, min_dist, stops_pts, sl_limit,
+                        )
+                        sl = sl_limit
+
+                # TP must be at least min_dist above exec_price (BUY) or below (SELL)
+                if is_buy:
+                    tp_limit = round(exec_price + min_dist, digits)
+                    if tp < tp_limit:
+                        logger.warning(
+                            "TP nudge [%s] BUY: tp=%.5f too close to ask=%.5f → nudging to %.5f",
+                            trade.symbol, tp, exec_price, tp_limit,
+                        )
+                        tp = tp_limit
+                else:
+                    tp_limit = round(exec_price - min_dist, digits)
+                    if tp > tp_limit:
+                        logger.warning(
+                            "TP nudge [%s] SELL: tp=%.5f too close to bid=%.5f → nudging to %.5f",
+                            trade.symbol, tp, exec_price, tp_limit,
+                        )
+                        tp = tp_limit
+
+                # Final sanity: SL and TP must be on opposite sides of exec_price
+                if is_buy and (sl >= exec_price or tp <= exec_price):
+                    logger.error(
+                        "TRADE ABORTED [%s] BUY invalid levels after nudge: "
+                        "ask=%.5f sl=%.5f tp=%.5f", trade.symbol, exec_price, sl, tp,
+                    )
+                    return None
+                if not is_buy and (sl <= exec_price or tp >= exec_price):
+                    logger.error(
+                        "TRADE ABORTED [%s] SELL invalid levels after nudge: "
+                        "bid=%.5f sl=%.5f tp=%.5f", trade.symbol, exec_price, sl, tp,
+                    )
+                    return None
+
+                trade.stop_loss   = sl
+                trade.take_profit = tp
+                trade.entry_price = exec_price   # use live price, not stale signal price
+        except Exception as _e:
+            logger.warning("place_trade pre-flight check failed for %s: %s", trade.symbol, _e)
+
         order = {
             "symbol":  trade.symbol,
             "type":    "BUY" if trade.direction == Direction.BULLISH else "SELL",

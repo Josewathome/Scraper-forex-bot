@@ -273,6 +273,8 @@ class MT5Gateway:
             "volume_min":          float(info.volume_min),
             "volume_max":          float(info.volume_max),
             "volume_step":         float(info.volume_step),
+            "stops_level":         int(info.trade_stops_level),   # broker min stop distance in points
+            "freeze_level":        int(info.trade_freeze_level),  # broker freeze distance in points
         }
 
     def get_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
