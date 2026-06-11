@@ -294,9 +294,24 @@ class ExecutionService:
                             state.current_sl = tight_sl
 
             elif cont >= EXIT_THRESHOLD:
-                # Thesis degraded — take partial exit if significantly in profit
-                # and TP1 hasn't fired yet (TP1 would have already secured profit)
-                if in_profit and profit_ratio >= 0.8 and not state.tp1_hit and act:
+                # Thesis degraded — close losing trades outright; partial exit only when in profit
+                if not in_profit and act:
+                    live_pips  = (pip_calc.price_to_pips(price - state.entry)
+                                  if trade_dir == Direction.BULLISH
+                                  else pip_calc.price_to_pips(state.entry - price))
+                    total_pips = state.accumulated_pips + live_pips
+                    _outcome   = "win" if total_pips > 0 else "loss"
+                    self._tr.close_trade(ticket)
+                    self._trade_states.pop(ticket, None)
+                    self._log_trade_summary(pos, state, pip_calc)
+                    self._journal_close(ticket, total_pips, _outcome)
+                    self._update_streak(symbol, total_pips)
+                    logger.info(
+                        "TRADE CLOSED action=reeval_losing_exit | %s ticket=%s | "
+                        "cont=%.2f | pips=%.1f | held=%.1fmin",
+                        symbol, ticket, cont, total_pips, duration_min,
+                    )
+                elif in_profit and profit_ratio >= 0.8 and not state.tp1_hit and act:
                     close_pct = 0.50
                     close_vol = max(
                         0.01, round(math.floor(state.lot_size * close_pct * 100) / 100, 2)
@@ -504,10 +519,16 @@ class ExecutionService:
                 if price < state.mfe_price or state.mfe_price == state.entry:
                     state.mfe_price = price
 
-            mfe_pips     = pip_calc.price_to_pips(abs(state.mfe_price - state.entry))
-            live_pips    = (pip_calc.price_to_pips(price - state.entry)
-                            if state.direction == Direction.BULLISH
-                            else pip_calc.price_to_pips(state.entry - price))
+            mfe_pips  = pip_calc.price_to_pips(abs(state.mfe_price - state.entry))
+            live_pips = (pip_calc.price_to_pips(price - state.entry)
+                         if state.direction == Direction.BULLISH
+                         else pip_calc.price_to_pips(state.entry - price))
+            # Clamp MFE sign: for BULLISH mfe_price >= entry (or = entry at start),
+            # for BEARISH mfe_price <= entry. Negative live_pips means trade is losing.
+            if state.direction == Direction.BULLISH and state.mfe_price < state.entry:
+                mfe_pips = -mfe_pips
+            elif state.direction == Direction.BEARISH and state.mfe_price > state.entry:
+                mfe_pips = -mfe_pips
             duration_min = (now - state.created_at).total_seconds() / 60
 
             _last_mfe_log = self._mfe_last_logged.get(ticket)

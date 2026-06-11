@@ -529,8 +529,13 @@ def _run_strategy_evaluation(
     if not m1_candles or not m5_candles:
         return
 
-    import time as _t
-    elapsed = (_t.time() - forming_m1.time.timestamp()) if forming_m1 is not None else 30.0
+    if forming_m1 is not None:
+        try:
+            elapsed = max(0.0, min(60.0, (stream_repo.now() - forming_m1.time).total_seconds()))
+        except Exception:
+            elapsed = 30.0
+    else:
+        elapsed = 30.0
 
     try:
         current_price = stream_repo.get_current_price(symbol)
