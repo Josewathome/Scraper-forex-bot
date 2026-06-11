@@ -297,9 +297,9 @@ SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "3"
 # Saves the last slot(s) for A/B quality setups.
 SCALPER_SOFT_CAPACITY: int = int(os.environ.get("SCALPER_SOFT_CAPACITY", "2"))
 
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))  # relaxed from 0.55 — 0.50 still requires M1+M5 agreement; gives more signals
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.20"))  # relaxed from 0.55 — tick formula scores 0.06-0.29 under normal conditions; alignment gate already filters quality
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))  # relaxed from 0.30
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.43"))  # M1-first: 0.65×0.70 = 0.455 → a clear M1 structure break alone clears this
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.15"))  # lowered from 0.20 — tick gate is secondary; alignment + structure are primary filters
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.10"))  # lowered from 0.20 — scalp candles are small; body check is last resort filter
 
 # Entry context scorer — thresholds for autonomous gate adaptation
 ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
