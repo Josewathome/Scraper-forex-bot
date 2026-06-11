@@ -140,9 +140,9 @@ class EntryContextScorer:
         Returns an EntryContext with effective thresholds and full reasoning.
         """
         ctx = EntryContext(
-            effective_align_threshold  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.50),
-            effective_tick_threshold   = getattr(config, "SCALPER_MIN_TICK_SCORE",      0.20),
-            effective_candle_threshold = getattr(config, "SCALPER_MIN_CANDLE_SCORE",    0.20),
+            effective_align_threshold  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.43),
+            effective_tick_threshold   = getattr(config, "SCALPER_MIN_TICK_SCORE",      0.15),
+            effective_candle_threshold = getattr(config, "SCALPER_MIN_CANDLE_SCORE",    0.10),
         )
         reason = ctx.reasoning
 
@@ -222,10 +222,12 @@ class EntryContextScorer:
 
         # ── Derive effective thresholds from flags ─────────────────────
 
+        # Ranging only blocks ALIGN relaxation — tick/candle can still ease
+        # because range boundaries are valid scalp entries with tick confirmation.
         if not ctx.ranging_regime:
             self._adapt_align_threshold(ctx, m1_score, m5_score, m5_opposes_m1)
-            self._adapt_tick_threshold(ctx, tick_score, tick_bias_strength)
-            self._adapt_candle_threshold(ctx, elapsed_fraction, tick_bias_strength)
+        self._adapt_tick_threshold(ctx, tick_score, tick_bias_strength, ctx.ranging_regime)
+        self._adapt_candle_threshold(ctx, elapsed_fraction, tick_bias_strength)
 
         return ctx
 
@@ -241,28 +243,27 @@ class EntryContextScorer:
         """
         Alignment threshold adaptation.
 
-        Standard case: keep at base (0.50).
+        M5_AGREES_STRONG: Both timeframes agree AND combined is high.
+          Lower align further to 0.38 to make sure no near-perfect setups are
+          blocked by small rounding differences near the threshold.
 
-        M5 weakening + M1 strong + tick confirms:
-          The M5 conflict penalty caps combined at base - 0.01 (= 0.49 by default).
-          When M5 is visibly losing momentum AND ticks confirm M1 direction, the
-          0.49 cap is overly punishing. We lower the threshold to 0.45 so that
-          a strong M1 BOS with a fading M5 can pass.
-
-          This is NOT a blanket M1-only pathway — it only activates when all three
-          conditions hold: M1 strong (≥ 0.80), M5 weakening (< 0.70), tick confirms.
+        M5_WEAKENING + M1 strong + tick confirms:
+          M5 opposing but fading. Lower to 0.40 to let strong M1 BOS pass
+          even when tick_confirms isn't present (we now have direction from M1).
         """
-        if (
-            ctx.m5_weakening
-            and ctx.tick_confirms
-            and m1_score >= 0.80
-        ):
-            new_thresh = max(0.43, ctx.effective_align_threshold - 0.07)
+        if ctx.m5_agrees and m5_score >= 0.80 and m1_score >= 0.70:
+            new_thresh = max(0.38, ctx.effective_align_threshold - 0.05)
             ctx.effective_align_threshold = new_thresh
             ctx.reasoning.append(
-                f"ALIGN_RELAX: m1_score={m1_score:.2f}≥0.80, M5 weakening, tick confirms → "
-                f"lower align threshold to {new_thresh:.2f} "
-                "(M5 fading; M1+tick combination sufficient)"
+                f"ALIGN_RELAX: M5_AGREES_STRONG m5_score={m5_score:.2f} m1_score={m1_score:.2f} → "
+                f"lower align to {new_thresh:.2f} (both TFs aligned, near-perfect setup)"
+            )
+        elif ctx.m5_weakening and m1_score >= 0.70:
+            new_thresh = max(0.40, ctx.effective_align_threshold - 0.05)
+            ctx.effective_align_threshold = new_thresh
+            ctx.reasoning.append(
+                f"ALIGN_RELAX: M5_WEAKENING m1_score={m1_score:.2f}≥0.70, m5_score={m5_score:.2f}<0.70 → "
+                f"lower align to {new_thresh:.2f} (M5 fading; M1 structure sufficient)"
             )
 
     def _adapt_tick_threshold(
@@ -270,24 +271,34 @@ class EntryContextScorer:
         ctx:              EntryContext,
         tick_score:       float,
         bias_strength:    float,
+        is_ranging:       bool = False,
     ) -> None:
         """
         Tick threshold adaptation.
 
-        Tick score is a composite (velocity × acceleration × imbalance). Low
-        imbalance with high velocity scores low even though the move is real.
-
-        When we are in a POST_BOS + BURST_MOVE context, the velocity component
-        is already represented in the burst flag. We can lower the tick threshold
-        slightly because the alignment gate already filtered direction quality.
+        POST_BOS + BURST: velocity already shown, lower tick threshold.
+        M5_AGREES_STRONG: both TFs aligned, tick is confirmation not gatekeeper.
+        RANGING: allow moderate relax so range-boundary scalps still work.
         """
         if ctx.post_bos_lag and ctx.burst_move and bias_strength >= 0.15:
-            new_thresh = max(0.12, ctx.effective_tick_threshold - 0.06)
+            new_thresh = max(0.10, ctx.effective_tick_threshold - 0.05)
             ctx.effective_tick_threshold = new_thresh
             ctx.reasoning.append(
-                f"TICK_RELAX: post-BOS + burst move, bias_strength={bias_strength:.2f} → "
-                f"lower tick threshold to {new_thresh:.2f} "
-                "(burst already confirms velocity; alignment gate filtered quality)"
+                f"TICK_RELAX: post-BOS + burst, bias={bias_strength:.2f} → "
+                f"tick threshold {new_thresh:.2f} (burst confirms velocity)"
+            )
+        elif ctx.m5_agrees and bias_strength >= 0.10:
+            new_thresh = max(0.10, ctx.effective_tick_threshold - 0.05)
+            ctx.effective_tick_threshold = new_thresh
+            ctx.reasoning.append(
+                f"TICK_RELAX: M5_AGREES, tick is confirmation not gate → {new_thresh:.2f}"
+            )
+        elif is_ranging and ctx.tick_confirms:
+            # Range boundary: tick confirms entry into structure extreme
+            new_thresh = max(0.12, ctx.effective_tick_threshold - 0.03)
+            ctx.effective_tick_threshold = new_thresh
+            ctx.reasoning.append(
+                f"TICK_RELAX: RANGING + TICK_CONFIRMS → {new_thresh:.2f} (range boundary scalp)"
             )
 
     def _adapt_candle_threshold(

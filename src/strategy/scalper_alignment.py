@@ -126,21 +126,28 @@ class ScalperAlignmentEngine:
         raw_score = self.M1_WEIGHT * m1_score + self.M5_WEIGHT * m5_score
 
         # Direction: M1 structure drives direction.
-        # M5 must not be actively opposing (if M5 is trending opposite, block).
+        # M5 is context — it penalises but does not hard-block a clear M1 signal.
         if m1_direction is not None:
             if m5_direction is not None and m5_direction != m1_direction:
-                # M5 actively trending against M1 — block entry
-                direction: Optional[Direction] = None
-                raw_score = min(raw_score, min_score - 0.01)
+                if m1_score >= 0.70:
+                    # M1 structure clear (BOS/strong trend) — trade M1 direction.
+                    # M5 penalty: score = M1 contribution only (M5 component = 0).
+                    # Combined ≥ 0.455 for m1_score=0.70, ≥ 0.52 for m1_score=0.80.
+                    direction = m1_direction
+                    raw_score = self.M1_WEIGHT * m1_score
+                else:
+                    # M1 weak and M5 opposing — genuinely ambiguous, block
+                    direction = None
+                    raw_score = min(raw_score, min_score - 0.01)
             else:
-                # M5 agrees or is flat — M1 direction wins
+                # M5 agrees or is flat — M1 direction wins, full combined score
                 direction = m1_direction
         elif m5_direction is not None and m5_score >= 0.85:
             # M1 inconclusive but M5 very strongly trending — follow M5
             direction = m5_direction
         else:
             direction = None
-            raw_score = min(raw_score, min_score - 0.01)  # force block
+            raw_score = min(raw_score, min_score - 0.01)  # no signal
 
         # Regime: use M5 ATR ratio as ranging detector (informational — no penalty)
         regime = self._detect_regime(m5_candles)
