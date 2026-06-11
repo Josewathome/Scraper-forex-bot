@@ -191,9 +191,9 @@ def _seed_builders(
 def run_stream() -> None:
     gw = connect_mt5()
 
-    clock      = BrokerClock(gw)
-    broker_now = clock.now()
-    logger.info("Broker time at startup: %s UTC", broker_now.strftime("%Y-%m-%dT%H:%M:%S"))
+    clock     = BrokerClock(gw)   # TrueTimeClock NTP-calibrated inside
+    true_now  = clock.now()
+    logger.info("True UTC at startup (NTP): %s", true_now.strftime("%Y-%m-%dT%H:%M:%S"))
 
     _detected_offset = gw.detect_utc_offset()
     if _detected_offset != 0:
