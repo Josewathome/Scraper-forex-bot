@@ -538,8 +538,14 @@ class EntryGate:
         """
         try:
             spread = broker_cost.spread_pips
-            if spread is None or spread <= 0 or spread > getattr(config, "MAX_SPREAD_PIPS", 40.0):
-                logger.info("COST_GATE [%s] spread=%.2f pips out of range — rejecting", symbol, spread or -1)
+            # Per-symbol absolute spread cap (gold's pips are $0.01 → naturally
+            # wider), falling back to the global MAX_SPREAD_PIPS for everything else.
+            _spread_caps = getattr(config, "SCALPER_MAX_SPREAD_PIPS", {})
+            max_spread = (_spread_caps.get(symbol, getattr(config, "MAX_SPREAD_PIPS", 40.0))
+                          if isinstance(_spread_caps, dict) else getattr(config, "MAX_SPREAD_PIPS", 40.0))
+            if spread is None or spread <= 0 or spread > max_spread:
+                logger.info("COST_GATE [%s] spread=%.2f pips > cap=%.1f — rejecting",
+                            symbol, spread if spread is not None else -1, max_spread)
                 return False
 
             cost = broker_cost.round_trip_cost_pips()
@@ -665,15 +671,8 @@ class EntryGate:
             extra_pips = float(_extra)
         buffer = pip_calc.pips_to_price(extra_pips)
 
-        sl_price = None
-        if signal.direction == Direction.BULLISH:
-            ref = signal.last_swing_support
-            if ref is not None:
-                sl_price = ref - buffer
-        else:
-            ref = signal.last_swing_resistance
-            if ref is not None:
-                sl_price = ref + buffer
+        is_long   = signal.direction == Direction.BULLISH
+        swing_ref = signal.last_swing_support if is_long else signal.last_swing_resistance
 
         _min_sl = getattr(config, "SCALPER_MIN_SL_PIPS", {})
         _max_sl = getattr(config, "SCALPER_MAX_SL_PIPS", {})
@@ -681,6 +680,35 @@ class EntryGate:
                     if isinstance(_min_sl, dict) else float(_min_sl))
         max_pips = (_max_sl.get(signal.symbol, getattr(config, "SCALPER_MAX_SL_PIPS_DEFAULT", 12.0))
                     if isinstance(_max_sl, dict) else float(_max_sl))
+
+        # ── GOLD (ATR-primary): volatility-adaptive stop ──────────────
+        # For symbols in SCALPER_ATR_PRIMARY_SYMBOLS the stop is sized from the
+        # instrument's own M5 ATR (so it auto-adapts to calm vs volatile gold),
+        # placed behind structure when available, then clamped to ATR bounds and
+        # the absolute SCALPER_MIN/MAX_SL_PIPS guards. Other symbols skip this
+        # block entirely and keep the unchanged swing-first / ATR-fallback path.
+        atr_primary = signal.symbol in getattr(config, "SCALPER_ATR_PRIMARY_SYMBOLS", set())
+        if atr_primary and m5_atr > 0:
+            atr_floor_pips = pip_calc.price_to_pips(m5_atr * getattr(config, "SCALPER_ATR_SL_MIN_MULT", 0.7))
+            atr_ceil_pips  = pip_calc.price_to_pips(m5_atr * getattr(config, "SCALPER_ATR_SL_MAX_MULT", 1.5))
+            default_pips   = pip_calc.price_to_pips(m5_atr * getattr(config, "SCALPER_ATR_SL_DEFAULT_MULT", 1.0))
+            if swing_ref is not None:
+                swing_price  = swing_ref - buffer if is_long else swing_ref + buffer
+                swing_pips   = pip_calc.price_to_pips(abs(current_price - swing_price))
+                # Behind structure, but never tighter than the ATR floor (noise)
+                # nor wider than the ATR ceiling (risk).
+                sl_dist_pips = max(atr_floor_pips, min(swing_pips, atr_ceil_pips))
+            else:
+                sl_dist_pips = default_pips
+            # Absolute hard guards (e.g. gold 150–500 pips = $1.50–$5.00).
+            sl_dist_pips = max(min_pips, min(sl_dist_pips, max_pips))
+            sl_dist      = pip_calc.pips_to_price(sl_dist_pips)
+            return current_price - sl_dist if is_long else current_price + sl_dist
+
+        # ── Standard (FX): swing-first, ATR fallback (UNCHANGED) ──────
+        sl_price = None
+        if swing_ref is not None:
+            sl_price = swing_ref - buffer if is_long else swing_ref + buffer
 
         if sl_price is not None:
             dist_pips = pip_calc.price_to_pips(abs(current_price - sl_price))
@@ -693,7 +721,7 @@ class EntryGate:
             sl_dist_pips = pip_calc.price_to_pips(sl_dist)
             sl_dist_pips = max(min_pips, min(sl_dist_pips, max_pips))
             sl_dist      = pip_calc.pips_to_price(sl_dist_pips)
-            if signal.direction == Direction.BULLISH:
+            if is_long:
                 sl_price = current_price - sl_dist
             else:
                 sl_price = current_price + sl_dist

@@ -730,7 +730,10 @@ class ExecutionService:
                             else price < state.entry)
             profit_ratio = abs(price - state.entry) / sl_dist if sl_dist > 0 else 0.0
             duration_min = (now - state.created_at).total_seconds() / 60
-            _max_dur     = getattr(config, "SCALPER_MAX_HOLD_MINUTES", 30)
+            _hold_overrides = getattr(config, "SCALPER_MAX_HOLD_MINUTES_PER_SYMBOL", {})
+            _max_dur        = (_hold_overrides.get(symbol, getattr(config, "SCALPER_MAX_HOLD_MINUTES", 30))
+                               if isinstance(_hold_overrides, dict)
+                               else getattr(config, "SCALPER_MAX_HOLD_MINUTES", 30))
 
             should_close = False
             action       = None
