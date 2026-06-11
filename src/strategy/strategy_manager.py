@@ -324,15 +324,28 @@ class StrategyManager:
             )
             return None
 
-        # Candle direction must agree with structural direction
-        if (direction == Direction.BULLISH and candle_result.score < 0) or \
-           (direction == Direction.BEARISH and candle_result.score > 0):
-            logger.info(
-                "GATE6 BLOCK [%s] candle direction CONFLICTS — structure=%s candle=%s",
-                symbol, direction.value,
-                "BEAR" if candle_result.score < 0 else "BULL",
-            )
-            return None
+        # Candle direction must agree with structural direction.
+        # Exception: when EARLY_CANDLE is active (< 55% of bar), a tiny opposing score
+        # is a DOJI — body hasn't formed yet, tick bias is the real signal. Only
+        # hard-block when the opposing candle is substantial (> 2× threshold).
+        candle_conflicts = (
+            (direction == Direction.BULLISH and candle_result.score < 0) or
+            (direction == Direction.BEARISH and candle_result.score > 0)
+        )
+        if candle_conflicts:
+            if entry_ctx.early_candle and abs(candle_result.score) < entry_ctx.effective_candle_threshold * 2:
+                logger.info(
+                    "GATE6 PASS [%s] early-candle DOJI forgiven — structure=%s score=%.3f (body not yet formed)",
+                    symbol, direction.value, candle_result.score,
+                )
+            else:
+                logger.info(
+                    "GATE6 BLOCK [%s] candle direction CONFLICTS — structure=%s candle=%s score=%.3f",
+                    symbol, direction.value,
+                    "BEAR" if candle_result.score < 0 else "BULL",
+                    candle_result.score,
+                )
+                return None
 
         # ── Gate 7: Trade quality score (autonomous entry quality) ───────
         try:
