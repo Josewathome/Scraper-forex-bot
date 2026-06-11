@@ -96,8 +96,21 @@ class MT5TradeRepository(ITradeRepository):
                 trade.stop_loss   = sl
                 trade.take_profit = tp
                 trade.entry_price = exec_price   # use live price, not stale signal price
+            else:
+                # Could not read symbol info / tick — we cannot validate that the
+                # SL/TP clear the broker stop level. FAIL CLOSED: refuse the order
+                # rather than send levels MT5 will reject (or fill unprotected).
+                logger.error(
+                    "TRADE ABORTED [%s] pre-flight: symbol info/tick unavailable — cannot validate stops",
+                    trade.symbol,
+                )
+                return None
         except Exception as _e:
-            logger.warning("place_trade pre-flight check failed for %s: %s", trade.symbol, _e)
+            logger.error(
+                "TRADE ABORTED [%s] pre-flight check raised: %s — failing closed",
+                trade.symbol, _e,
+            )
+            return None
 
         order = {
             "symbol":  trade.symbol,
@@ -205,12 +218,49 @@ class MT5TradeRepository(ITradeRepository):
         return info["free_margin"] if info else 0.0
 
     def get_required_margin(self, trade: Trade) -> Optional[float]:
+        # Margin is independent of SL/TP; zero them so order_check does not
+        # reject the margin query on a transient "invalid stops" retcode.
         order = {
             "symbol": trade.symbol,
             "type":   "BUY" if trade.direction == Direction.BULLISH else "SELL",
             "volume": round(trade.lot_size, 2),
             "price":  trade.entry_price,
-            "sl":     trade.stop_loss,
-            "tp":     trade.take_profit,
+            "sl":     0.0,
+            "tp":     0.0,
         }
         return self._gw.check_order_margin(order)
+
+    def get_margin_for_volume(
+        self, symbol: str, direction, price: float, volume: float
+    ) -> Optional[float]:
+        """Margin (account currency) MT5 would require for `volume` lots. None if unknown."""
+        order = {
+            "symbol": symbol,
+            "type":   "BUY" if direction == Direction.BULLISH else "SELL",
+            "volume": round(float(volume), 2),
+            "price":  float(price),
+            "sl":     0.0,
+            "tp":     0.0,
+        }
+        return self._gw.check_order_margin(order)
+
+    def get_position_realized_pnl(self, ticket: int) -> Optional[dict]:
+        """Broker-truth realised P&L (account currency) for a closed position."""
+        return self._gw.get_position_realized_pnl(ticket)
+
+    def get_margin_level_pct(self) -> Optional[float]:
+        """Account margin level % = equity / used_margin × 100. None if no used margin."""
+        info = self._gw.get_account_info()
+        if not info:
+            return None
+        used = info.get("margin", 0.0)
+        if used and used > 0:
+            return info.get("equity", 0.0) / used * 100.0
+        return None  # no open margin in use → level is effectively infinite
+
+    def get_account_equity(self) -> Optional[float]:
+        info = self._gw.get_account_info()
+        return info.get("equity") if info else None
+
+    def get_symbol_meta(self, symbol: str) -> Optional[dict]:
+        return self._gw.get_symbol_info(symbol)

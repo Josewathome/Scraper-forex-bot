@@ -612,24 +612,26 @@ def _run_strategy_evaluation(
         except Exception:
             pass
 
-    try:
-        digits     = mt5_repo.get_symbol_digits(symbol) if mt5_repo else 5
-        tick_value = mt5_repo.get_tick_value(symbol)    if mt5_repo else 10.0
-    except Exception:
-        digits, tick_value = 5, 10.0
+    from src.domain.value_objects import PipCalculator
 
-    from src.domain.value_objects import PipCalculator, BrokerCost
+    # Symbol metadata + CORRECT per-pip value (account currency). pip_value=0
+    # signals bad/unavailable tick data → entry gate will fail closed.
+    try:
+        digits    = mt5_repo.get_symbol_digits(symbol) if mt5_repo else 5
+        pip_value = mt5_repo.get_pip_value(symbol)     if mt5_repo else 0.0
+    except Exception as exc:
+        logger.error("Symbol meta/pip_value fetch failed for %s: %s", symbol, exc)
+        digits, pip_value = 5, 0.0
+
     pip_calc = PipCalculator(digits=digits)
 
+    # Real broker cost (live spread + per-symbol, currency-converted commission +
+    # correct pip value) from the SpreadCalculator used by ExecutionService.
     try:
-        spread_pips = stream_repo.get_spread_pips(symbol)
-    except Exception:
-        spread_pips = 1.5
-
-    broker_cost = BrokerCost(
-        spread_pips=    spread_pips,
-        commission_usd= getattr(config, "COMMISSION_PER_LOT", 0.0),
-    )
+        broker_cost = entry_gate._exec._spread.get_broker_cost(symbol)
+    except Exception as exc:
+        logger.error("Broker cost fetch failed for %s: %s — skipping entry", symbol, exc)
+        return
 
     # M5 ATR for SL computation
     h1_atr = 0.0
@@ -649,7 +651,7 @@ def _run_strategy_evaluation(
         now=           eval_now,
         balance=       balance,
         pip_calc=      pip_calc,
-        tick_value=    tick_value,
+        pip_value=     pip_value,
         digits=        digits,
         h1_atr=        h1_atr,
         broker_cost=   broker_cost,

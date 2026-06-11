@@ -61,18 +61,46 @@ class TradeJournal:
     def record_close(
         self,
         ticket:  int,
-        pnl:     float,
-        outcome: str,   # WIN_FULL | WIN_PARTIAL | LOSS | MONITOR_CLOSE
+        pnl:     float,          # BROKER-TRUTH realised P&L, account currency
+        outcome: str,            # "win" | "loss" | "breakeven" (display only)
+        pips:    float = 0.0,    # approximate pips (sign exact) for EV/analytics
     ) -> None:
         for t in reversed(self._trades):
             if t["ticket"] == ticket and t["outcome"] == "OPEN":
                 t["pnl"]       = round(pnl, 2)
+                t["pips"]      = round(pips, 2)
                 t["outcome"]   = outcome
                 t["closed_at"] = datetime.now(tz=timezone.utc).isoformat()
                 self._save()
-                logger.debug("Journal: closed ticket=%s outcome=%s pnl=%.2f", ticket, outcome, pnl)
+                logger.debug("Journal: closed ticket=%s outcome=%s pnl=%.2f pips=%.2f",
+                             ticket, outcome, pnl, pips)
                 return
         logger.warning("Journal: no open record found for ticket=%s", ticket)
+
+    def rolling_performance(self, symbol: str, n: int = 50) -> dict:
+        """
+        Broker-truth rolling performance for the EV gate, over the last `n`
+        CLOSED trades for `symbol`. Win/loss is classified by realised P&L sign
+        (the only truth) — never by label. Returns avg win/loss in PIPS.
+        """
+        closed = [
+            t for t in self._trades
+            if t.get("symbol") == symbol and t.get("outcome") != "OPEN"
+            and t.get("pnl") is not None
+        ][-n:]
+        wins   = [t for t in closed if (t.get("pnl") or 0) > 0]
+        losses = [t for t in closed if (t.get("pnl") or 0) < 0]
+        resolved = len(wins) + len(losses)
+        if resolved == 0:
+            return {"samples": 0, "win_rate": 0.0, "avg_win_pips": 0.0, "avg_loss_pips": 0.0}
+        avg_win_pips  = (sum(abs(t.get("pips") or 0) for t in wins) / len(wins)) if wins else 0.0
+        avg_loss_pips = (sum(abs(t.get("pips") or 0) for t in losses) / len(losses)) if losses else 0.0
+        return {
+            "samples":       resolved,
+            "win_rate":      len(wins) / resolved,
+            "avg_win_pips":  avg_win_pips,
+            "avg_loss_pips": avg_loss_pips,
+        }
 
     # ── Read ─────────────────────────────────────────────────────────
 
@@ -102,16 +130,21 @@ class TradeJournal:
             closed = [t for t in trades if t["outcome"] != "OPEN"]
 
         if not closed:
-            return {"total": 0, "wins": 0, "losses": 0,
+            return {"total": 0, "wins": 0, "losses": 0, "breakeven": 0,
                     "win_rate": 0.0, "total_pnl": 0.0, "avg_pnl": 0.0}
-        wins      = [t for t in closed if t["outcome"] in ("WIN_FULL", "WIN_PARTIAL")]
-        losses    = [t for t in closed if t["outcome"] == "LOSS"]
-        total_pnl = sum(t["pnl"] or 0 for t in closed)
+        # Classify by realised P&L SIGN — broker truth — not by the label string.
+        wins      = [t for t in closed if (t.get("pnl") or 0) > 0]
+        losses    = [t for t in closed if (t.get("pnl") or 0) < 0]
+        breakeven = [t for t in closed if (t.get("pnl") or 0) == 0]
+        total_pnl = sum(t.get("pnl") or 0 for t in closed)
+        resolved  = len(wins) + len(losses)
         return {
             "total":     len(closed),
             "wins":      len(wins),
             "losses":    len(losses),
-            "win_rate":  round(len(wins) / len(closed) * 100, 1),
+            "breakeven": len(breakeven),
+            # Win rate excludes breakevens from the denominator (true hit rate).
+            "win_rate":  round(len(wins) / resolved * 100, 1) if resolved else 0.0,
             "total_pnl": round(total_pnl, 2),
             "avg_pnl":   round(total_pnl / len(closed), 2),
         }

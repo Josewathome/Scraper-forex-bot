@@ -251,15 +251,17 @@ class EntryContextScorer:
           M5 opposing but fading. Lower to 0.40 to let strong M1 BOS pass
           even when tick_confirms isn't present (we now have direction from M1).
         """
+        # Floor: alignment never relaxes below 0.50 — a real structural bias is
+        # required, adaptation only shaves rounding noise off the base threshold.
         if ctx.m5_agrees and m5_score >= 0.80 and m1_score >= 0.70:
-            new_thresh = max(0.38, ctx.effective_align_threshold - 0.05)
+            new_thresh = max(0.50, ctx.effective_align_threshold - 0.05)
             ctx.effective_align_threshold = new_thresh
             ctx.reasoning.append(
                 f"ALIGN_RELAX: M5_AGREES_STRONG m5_score={m5_score:.2f} m1_score={m1_score:.2f} → "
                 f"lower align to {new_thresh:.2f} (both TFs aligned, near-perfect setup)"
             )
         elif ctx.m5_weakening and m1_score >= 0.70:
-            new_thresh = max(0.40, ctx.effective_align_threshold - 0.05)
+            new_thresh = max(0.50, ctx.effective_align_threshold - 0.05)
             ctx.effective_align_threshold = new_thresh
             ctx.reasoning.append(
                 f"ALIGN_RELAX: M5_WEAKENING m1_score={m1_score:.2f}≥0.70, m5_score={m5_score:.2f}<0.70 → "
@@ -281,21 +283,21 @@ class EntryContextScorer:
         RANGING: allow moderate relax so range-boundary scalps still work.
         """
         if ctx.post_bos_lag and ctx.burst_move and bias_strength >= 0.15:
-            new_thresh = max(0.10, ctx.effective_tick_threshold - 0.05)
+            new_thresh = max(0.40, ctx.effective_tick_threshold - 0.05)
             ctx.effective_tick_threshold = new_thresh
             ctx.reasoning.append(
                 f"TICK_RELAX: post-BOS + burst, bias={bias_strength:.2f} → "
                 f"tick threshold {new_thresh:.2f} (burst confirms velocity)"
             )
         elif ctx.m5_agrees and bias_strength >= 0.10:
-            new_thresh = max(0.10, ctx.effective_tick_threshold - 0.05)
+            new_thresh = max(0.40, ctx.effective_tick_threshold - 0.05)
             ctx.effective_tick_threshold = new_thresh
             ctx.reasoning.append(
                 f"TICK_RELAX: M5_AGREES, tick is confirmation not gate → {new_thresh:.2f}"
             )
         elif is_ranging and ctx.tick_confirms:
             # Range boundary: tick confirms entry into structure extreme
-            new_thresh = max(0.12, ctx.effective_tick_threshold - 0.03)
+            new_thresh = max(0.40, ctx.effective_tick_threshold - 0.03)
             ctx.effective_tick_threshold = new_thresh
             ctx.reasoning.append(
                 f"TICK_RELAX: RANGING + TICK_CONFIRMS → {new_thresh:.2f} (range boundary scalp)"
@@ -354,7 +356,7 @@ class EntryContextScorer:
 
         if relax > 0:
             # Cap total relaxation at 60 % of base
-            relax = min(relax, 0.60)
+            relax = min(relax, 0.50)
             new_thresh = round(base * (1.0 - relax), 3)
             ctx.effective_candle_threshold = new_thresh
             ctx.reasoning.append(

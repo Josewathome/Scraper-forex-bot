@@ -80,6 +80,42 @@ on your host machine — the container handles Wine + MT5 automatically.
 
 ---
 
+## 2a. Execution Correctness & Safety Guarantees
+
+The trading core enforces the following invariants. These are not aspirational —
+they are implemented and unit-tested in the live execution path.
+
+- **Correct position sizing.** Lot size is derived from the true *per-pip* money
+  value, `pip_value = trade_tick_value × (pip_size / trade_tick_size)`, in the
+  account currency. The bot never assumes MT5's `trade_tick_value` (a *per-point*
+  figure on 5-/3-digit symbols) is per-pip. If tick data is missing the trade is
+  **rejected** (it is never sized off a guess).
+- **Absolute risk ceiling.** After sizing and margin-fitting, a trade whose
+  realised SL risk would exceed `MAX_TRADE_RISK_PCT` of balance is rejected, even
+  at the broker-minimum lot.
+- **Real, currency-correct margin.** Margin and equity-reserve checks use live MT5
+  figures (`free_margin`, `order_check` margin, margin level). No leverage proxy.
+- **Gates fail closed.** News, spread/cost, expected-value, margin, trade-quality
+  and loss-streak gates **reject** when their inputs are missing, stale or
+  invalid — they never wave a trade through on error.
+- **Functional news shield.** Trading is blocked around high-impact events *and*
+  whenever the news cache is stale beyond `NEWS_MAX_STALENESS_MIN` (cannot prove
+  the market is clear → no entry).
+- **Real expected-value gate.** EV uses the **broker-truth rolling win rate / avg
+  win / avg loss** once `EV_MIN_SAMPLES` closed trades exist; before that it uses a
+  haircut assumed win rate. Round-trip cost (spread + commission-in-pips) must be
+  below `COST_MAX_FRACTION_OF_TARGET` of the TP1 target.
+- **Tiered take-profit that actually works.** The broker order's SL is the stop
+  and its **TP is set to TP2** (the final target / hard backstop). The software
+  manages the TP1 partial, profit-lock and structural trailing *before* TP2, so
+  the tiered exit is not pre-empted by the broker closing the whole position at TP1.
+- **Broker-truth analytics.** Every close is reconciled against MT5 deal history
+  (realised net P&L, including swap/commission). Win/loss is classified by the
+  **sign of realised money** — never reconstructed from maximum-favourable
+  excursion. If the bot loses money, the analytics show losses.
+
+---
+
 ## 3. Quick Start
 
 ### Step 1 — Clone and create your .env
@@ -441,8 +477,11 @@ This protects against runaway losing days. The counter resets at UTC midnight.
 ```env
 TP1_RR_RATIO=1.5
 ```
-TP1 (first partial close) is placed at `entry ± (SL_distance × 1.5)`.
-At TP1, 60% of the position is closed and the stop-loss moves to lock in 0.3R profit.
+TP1 (first partial close) is placed at `entry ± (SL_distance × 1.5)` and is managed
+in software. At TP1, a grade-dependent fraction of the position is closed (60% grade
+C / 50% B / 40% A+) and the stop-loss moves to lock in 0.3R profit. Note: the broker
+order's hard take-profit is set to **TP2** (the final backstop), not TP1, so the TP1
+partial and the trailing runner are not pre-empted by the broker.
 
 ```env
 TP2_RR_RATIO=2.5
@@ -507,7 +546,7 @@ proceed. Higher = fewer but higher-confidence signals. Lower = more signals
 but noisier entries. Range: `0.45` (aggressive) to `0.75` (conservative).
 
 ```env
-SCALPER_MIN_TICK_SCORE=0.55
+SCALPER_MIN_TICK_SCORE=0.50
 ```
 Minimum tick composite score (0.0–1.0) covering velocity, acceleration,
 directional imbalance, and price displacement. Signals with spread above 1.5×
@@ -828,7 +867,7 @@ spread noise rather than real adverse movement.
 | Setting | Default | Notes |
 |---|---|---|
 | `SCALPER_MIN_ALIGNMENT_SCORE` | `0.55` | M1+M5 structural alignment required. |
-| `SCALPER_MIN_TICK_SCORE` | `0.55` | Tick momentum composite required. |
+| `SCALPER_MIN_TICK_SCORE` | `0.50` | Tick momentum composite required. |
 | `SCALPER_MIN_CANDLE_SCORE` | `0.30` | Forming candle direction strength required. |
 | `SCALPER_MIN_TICK_VELOCITY` | `1.0` | Minimum ticks/second (measured over 5s window). |
 | `SCALPER_M5_EMA_PERIOD` | `10` | EMA period for M5 trend context. |

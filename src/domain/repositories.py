@@ -30,7 +30,20 @@ class IMarketDataRepository(ABC):
     def get_tick_value(self, symbol: str) -> float: ...
 
     @abstractmethod
+    def get_pip_value(self, symbol: str) -> float:
+        """Per-pip money value for 1.0 lot, in account currency. 0.0 if unknown."""
+        ...
+
+    @abstractmethod
     def get_symbol_digits(self, symbol: str) -> int: ...
+
+    def get_tick_size(self, symbol: str) -> float:
+        """Broker minimum price increment (point). 0.0 if unknown."""
+        raise NotImplementedError
+
+    def get_volume_constraints(self, symbol: str):
+        """Return (volume_min, volume_max, volume_step). None if unknown."""
+        raise NotImplementedError
 
     @abstractmethod
     def get_server_time_utc(self) -> datetime: ...
@@ -73,6 +86,28 @@ class ITradeRepository(ABC):
         raise NotImplementedError
 
     def get_required_margin(self, trade: Trade) -> Optional[float]:
+        raise NotImplementedError
+
+    def get_margin_for_volume(
+        self, symbol: str, direction, price: float, volume: float
+    ) -> Optional[float]:
+        """Margin (account currency) MT5 would require for `volume` lots. None if unknown."""
+        raise NotImplementedError
+
+    def get_position_realized_pnl(self, ticket: int) -> Optional[dict]:
+        """
+        Broker-truth realised P&L for a (now closed) position, summed over all
+        of its deals: {profit, price, time, volume} in account currency.
+        None if history is unavailable.
+        """
+        raise NotImplementedError
+
+    def get_margin_level_pct(self) -> Optional[float]:
+        """Account margin level % = equity/used_margin×100. None if no used margin/unknown."""
+        raise NotImplementedError
+
+    def get_symbol_meta(self, symbol: str) -> Optional[dict]:
+        """Raw symbol metadata dict (digits, point, volume_min/max/step, tick value/size)."""
         raise NotImplementedError
 
 

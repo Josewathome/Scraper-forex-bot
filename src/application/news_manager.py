@@ -21,19 +21,47 @@ class NewsManager:
     def __init__(self, news_repo: INewsRepository) -> None:
         self._repo             = news_repo
         self._windows:         List[NoTradeWindow] = []
-        self._last_refresh:    Optional[datetime]  = None
+        self._last_refresh:    Optional[datetime]  = None   # last attempt
+        self._last_refresh_ok: Optional[datetime]  = None   # last SUCCESSFUL refresh
         self._refresh_interval = timedelta(minutes=config.NEWS_REFRESH_INTERVAL_MINUTES)
+        self._max_staleness    = timedelta(
+            minutes=getattr(config, "NEWS_MAX_STALENESS_MIN", 30)
+        )
 
     # ── Public API ────────────────────────────
 
     def refresh_if_needed(self, now: Optional[datetime] = None) -> None:
         now = now or datetime.now(tz=timezone.utc)
         if self._last_refresh is None or (now - self._last_refresh) >= self._refresh_interval:
-            self._refresh_events(now)
             self._last_refresh = now
+            try:
+                self._refresh_events(now)
+                self._last_refresh_ok = now
+            except Exception as exc:
+                # Do NOT advance _last_refresh_ok — staleness will eventually
+                # trip the fail-closed news gate if this keeps failing.
+                logger.error("News refresh failed: %s — news data going stale", exc)
+
+    def is_data_fresh(self, now: datetime) -> bool:
+        """True only if we have a successful refresh within the staleness window."""
+        if self._last_refresh_ok is None:
+            return False
+        return (now - self._last_refresh_ok) <= self._max_staleness
 
     def is_blocked(self, symbol: str, now: Optional[datetime] = None) -> bool:
-        now        = now or datetime.now(tz=timezone.utc)
+        now = now or datetime.now(tz=timezone.utc)
+
+        # ── FAIL CLOSED on stale data ──────────────────────────────
+        # If we cannot prove the market is clear of high-impact news (no
+        # successful refresh recently), block the entry rather than trade blind.
+        if not self.is_data_fresh(now):
+            logger.warning(
+                "NEWS BLOCK | %s | news data stale (last_ok=%s) — failing closed",
+                symbol,
+                self._last_refresh_ok.strftime("%H:%M UTC") if self._last_refresh_ok else "never",
+            )
+            return True
+
         currencies = config.SYMBOL_CURRENCIES.get(symbol, [])
         for w in self._windows:
             if w.currency in currencies and w.is_blocking(now):
@@ -53,7 +81,7 @@ class NewsManager:
             return False
         atr_pips  = pip_calc.price_to_pips(atr_price)
         threshold = atr_pips * config.ATR_COST_THRESHOLD
-        cost_pips = broker_cost.total_cost_pips
+        cost_pips = broker_cost.round_trip_cost_pips()
         if cost_pips > threshold:
             logger.warning("COST BLOCK | %s | cost=%.2f pips > ATR×%.0f%%=%.2f pips",
                            symbol, cost_pips, config.ATR_COST_THRESHOLD * 100, threshold)
