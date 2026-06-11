@@ -1063,8 +1063,9 @@ class ExecutionService:
             free_margin = self._tr.get_free_margin()
             if free_margin and free_margin > 0:
                 safety = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
+                _ldiv  = getattr(config, "LEVERAGE_MARGIN_DIVISOR", 250.0)
                 margin_max_lots = math.floor(
-                    (free_margin * 0.40 / safety / 200.0) * 100
+                    (free_margin * 0.40 / safety / _ldiv) * 100
                 ) / 100
                 margin_max_lots = max(0.01, margin_max_lots)
                 if lot_size > margin_max_lots:
