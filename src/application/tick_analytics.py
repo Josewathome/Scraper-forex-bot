@@ -70,27 +70,26 @@ import src.config as config
 logger = logging.getLogger(__name__)
 
 # ── Directory setup ────────────────────────────────────────────────────────────
+
+def _linux_path(p: str) -> str:
+    """Translate Wine Z:-drive path to real Linux path; leave non-Z paths unchanged."""
+    if len(p) >= 2 and p[1] == ":" and p[0].upper() == "Z":
+        return p[2:].replace("\\", "/")  # "Z:/bot/analytics" → "/bot/analytics"
+    return p.replace("\\", "/")
+
 _ANALYTICS_DIR = os.environ.get("BOT_ANALYTICS_DIR", "/bot/analytics")
 
-_D = _ANALYTICS_DIR.rstrip("/\\")
+# Always resolve through _linux_path so that a Wine Z:-drive value like
+# "Z:/bot/analytics" becomes "/bot/analytics" before any file I/O.
+_D = _linux_path(_ANALYTICS_DIR.rstrip("/\\"))
 _RAW_FILE     = _D + "/tick_velocity_raw.jsonl"
 _HOURLY_FILE  = _D + "/tick_velocity_hourly.jsonl"
 _DAILY_FILE   = _D + "/tick_velocity_daily.jsonl"
 _WEEKLY_FILE  = _D + "/tick_velocity_weekly.jsonl"
 _REPORT_FILE  = _D + "/tick_velocity_report.txt"
 
-# Ensure the directory exists.  When running under Wine, BOT_ANALYTICS_DIR is
-# set to a Z:-drive path (e.g. "Z:/bot/analytics") which Wine maps to the Linux
-# root.  We translate that back to a real Linux path so os.makedirs works from
-# the Wine Python process.
-def _linux_path(p: str) -> str:
-    """Translate Wine Z:-drive path to Linux path, leave others unchanged."""
-    if len(p) >= 2 and p[1] == ":" and p[0].upper() == "Z":
-        return p[2:].replace("\\", "/")  # "Z:/bot/analytics" → "/bot/analytics"
-    return p.replace("\\", "/")
-
 try:
-    os.makedirs(_linux_path(_D), exist_ok=True)
+    os.makedirs(_D, exist_ok=True)
 except Exception as _e:
     logger.debug("TickAnalytics: could not create analytics dir %s: %s", _D, _e)
 
