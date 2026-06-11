@@ -255,9 +255,9 @@ class TickFeatureCalculator:
         # Price displacement in our direction
         disp = cls.price_displacement(ticks)
         if (direction == 1 and disp > 0) or (direction == -1 and disp < 0):
-            # Normalise: 5 pips of displacement = full score
-            # (works for EURUSD with 0.0001 pip; adjust per instrument)
-            disp_norm = min(abs(disp) / 0.0005, 1.0)
+            # Normalise: 2 pips of displacement = full score (reduced from 5 pips —
+            # typical M1 window sees 0.3-1.5 pip moves; 5 pips was never reached)
+            disp_norm = min(abs(disp) / 0.0002, 1.0)
         else:
             disp_norm = 0.0
         score += disp_norm * 0.25

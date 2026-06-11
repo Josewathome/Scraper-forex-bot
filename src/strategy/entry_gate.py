@@ -376,9 +376,11 @@ class EntryGate:
             lots     = max(0.01, round(raw_lots, 2))
 
             # Approximate required margin: lots × contract_size × price / leverage
-            # For a quick gate we use: free_margin < lots × 1000 as a proxy
-            # (This is conservative; MT5 will compute the exact figure)
-            req_margin_proxy = lots * 1000.0
+            # IC Markets standard leverage is 1:500 on forex pairs.
+            # lots × 100,000 / 500 = lots × 200.  Previous value (lots × 1000)
+            # assumed 1:100 leverage and falsely blocked all trades on small accounts.
+            # MT5 enforces the exact figure at execution; this is a pre-flight gate only.
+            req_margin_proxy = lots * 200.0
             safety_floor = getattr(config, "MARGIN_SAFETY_FACTOR", 1.5)
             if req_margin_proxy * safety_floor > free_margin:
                 logger.info(
