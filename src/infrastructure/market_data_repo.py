@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 
 from src.domain.entities import Candle, Timeframe
 from src.domain.repositories import IMarketDataRepository
-from src.domain.value_objects import PipCalculator
+from src.domain.value_objects import PipCalculator, pip_value_per_lot
 from src.infrastructure.mt5_bridge.mt5_gateway import MT5Gateway
 from src.infrastructure.time_sync import TrueTimeClock
 
@@ -118,6 +118,48 @@ class MT5MarketDataRepository(IMarketDataRepository):
     def get_tick_value(self, symbol: str) -> float:
         info = self._get_symbol_info_cached(symbol)
         return info["trade_tick_value"] if info else 0.0
+
+    def get_tick_size(self, symbol: str) -> float:
+        info = self._get_symbol_info_cached(symbol)
+        return info["trade_tick_size"] if info else 0.0
+
+    def get_pip_value(self, symbol: str) -> float:
+        """
+        Per-PIP money value for 1.0 lot, in account currency.
+
+        Derived correctly from MT5 tick data:
+            pip_value = trade_tick_value × (pip_size / trade_tick_size)
+
+        Returns 0.0 when symbol info is unavailable or inconsistent so the
+        caller FAILS CLOSED (rejects the trade) rather than sizing off a bad
+        number. This is the fix for the 10× lot-sizing error on 5-/3-digit
+        symbols where trade_tick_size (the point) ≠ one pip.
+        """
+        info = self._get_symbol_info_cached(symbol)
+        if not info:
+            logger.error("get_pip_value(%s): no symbol info — cannot size safely", symbol)
+            return 0.0
+        pip_size = PipCalculator(digits=info["digits"]).pip_size
+        pv = pip_value_per_lot(
+            tick_value=info["trade_tick_value"],
+            tick_size=info["trade_tick_size"],
+            pip_size=pip_size,
+        )
+        if pv <= 0:
+            logger.error(
+                "get_pip_value(%s): invalid tick data (tick_value=%s tick_size=%s) — pv=%s",
+                symbol, info.get("trade_tick_value"), info.get("trade_tick_size"), pv,
+            )
+        return pv
+
+    def get_volume_constraints(self, symbol: str):
+        info = self._get_symbol_info_cached(symbol)
+        if not info:
+            return None
+        return (info["volume_min"], info["volume_max"], info["volume_step"])
+
+    def get_symbol_meta(self, symbol: str) -> Optional[dict]:
+        return self._get_symbol_info_cached(symbol)
 
     def get_symbol_digits(self, symbol: str) -> int:
         info = self._get_symbol_info_cached(symbol)

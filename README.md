@@ -80,6 +80,64 @@ on your host machine — the container handles Wine + MT5 automatically.
 
 ---
 
+## 2a. Execution Correctness & Safety Guarantees
+
+The trading core enforces the following invariants. These are not aspirational —
+they are implemented and unit-tested in the live execution path.
+
+- **Correct position sizing.** Lot size is derived from the true *per-pip* money
+  value, `pip_value = trade_tick_value × (pip_size / trade_tick_size)`, in the
+  account currency. The bot never assumes MT5's `trade_tick_value` (a *per-point*
+  figure on 5-/3-digit symbols) is per-pip. If tick data is missing the trade is
+  **rejected** (it is never sized off a guess).
+- **Absolute risk ceiling.** After sizing and margin-fitting, a trade whose
+  realised SL risk would exceed `MAX_TRADE_RISK_PCT` of balance is rejected, even
+  at the broker-minimum lot.
+- **Real, currency-correct margin.** Margin and equity-reserve checks use live MT5
+  figures (`free_margin`, `order_check` margin, margin level). No leverage proxy.
+- **Gates fail closed.** News, spread/cost, expected-value, margin, trade-quality
+  and loss-streak gates **reject** when their inputs are missing, stale or
+  invalid — they never wave a trade through on error.
+- **Functional news shield.** Trading is blocked around high-impact events *and*
+  whenever the news cache is stale beyond `NEWS_MAX_STALENESS_MIN` (cannot prove
+  the market is clear → no entry).
+- **Real expected-value gate.** EV uses the **broker-truth rolling win rate / avg
+  win / avg loss** once `EV_MIN_SAMPLES` closed trades exist; before that it uses a
+  haircut assumed win rate. Round-trip cost (spread + commission-in-pips) must be
+  below `COST_MAX_FRACTION_OF_TARGET` of the TP1 target.
+- **Tiered take-profit that actually works.** The broker order's SL is the stop
+  and its **TP is set to TP2** (the final target / hard backstop). The software
+  manages the TP1 partial, profit-lock and structural trailing *before* TP2, so
+  the tiered exit is not pre-empted by the broker closing the whole position at TP1.
+- **Broker-truth analytics.** Every close is reconciled against MT5 deal history
+  (realised net P&L, including swap/commission). Win/loss is classified by the
+  **sign of realised money** — never reconstructed from maximum-favourable
+  excursion. If the bot loses money, the analytics show losses.
+- **Fill-anchored levels.** After the order fills, the tracked entry, SL distance,
+  TP1/TP2 and MFE are anchored to the **actual fill price** (not the stale
+  signal-time price), so risk and R:R reflect what was really executed.
+- **EV reflects the real exit plan.** The EV gate's expected win is the
+  **blended** value of the TP1 partial + TP2 + runner (weighted by close
+  fractions), not a naive "100% at TP1". The runner is modelled conservatively
+  at `RUNNER_EXIT_RR`.
+- **Controlled exploration bootstrap.** Because a fresh system has no broker-truth
+  samples to compute EV from, up to `EXPLORATION_TRADES_PER_DAY` minimum-risk
+  probe trades per symbol may bypass **only** the EV edge requirement (every
+  other gate still applies) until `EV_MIN_SAMPLES` real outcomes exist. After
+  that, the rolling broker-truth EV governs and exploration stops. Exploration
+  never bypasses a fail-closed ("unknown cost") condition.
+- **Reversal re-entry cooldown.** After a reversal/structural-reversal exit, new
+  entries on that symbol are blocked for `REVERSAL_REENTRY_COOLDOWN_SEC` to stop
+  whipsaw churn.
+- **Ranging suppression.** In a detected ranging regime the alignment threshold
+  is raised by `RANGING_ALIGN_PENALTY`, so M1 chop must clear a higher bar.
+- **News coverage is explicit.** With no external `NEWS_API_KEY`, the bot logs a
+  prominent startup warning that coverage is MT5-best-effort; set
+  `NEWS_REQUIRE_EXTERNAL_FEED=true` to fail closed (block all trading) until a
+  real external feed is configured.
+
+---
+
 ## 3. Quick Start
 
 ### Step 1 — Clone and create your .env
@@ -441,8 +499,11 @@ This protects against runaway losing days. The counter resets at UTC midnight.
 ```env
 TP1_RR_RATIO=1.5
 ```
-TP1 (first partial close) is placed at `entry ± (SL_distance × 1.5)`.
-At TP1, 60% of the position is closed and the stop-loss moves to lock in 0.3R profit.
+TP1 (first partial close) is placed at `entry ± (SL_distance × 1.5)` and is managed
+in software. At TP1, a grade-dependent fraction of the position is closed (60% grade
+C / 50% B / 40% A+) and the stop-loss moves to lock in 0.3R profit. Note: the broker
+order's hard take-profit is set to **TP2** (the final backstop), not TP1, so the TP1
+partial and the trailing runner are not pre-empted by the broker.
 
 ```env
 TP2_RR_RATIO=2.5
@@ -507,7 +568,7 @@ proceed. Higher = fewer but higher-confidence signals. Lower = more signals
 but noisier entries. Range: `0.45` (aggressive) to `0.75` (conservative).
 
 ```env
-SCALPER_MIN_TICK_SCORE=0.55
+SCALPER_MIN_TICK_SCORE=0.50
 ```
 Minimum tick composite score (0.0–1.0) covering velocity, acceleration,
 directional imbalance, and price displacement. Signals with spread above 1.5×
@@ -828,7 +889,7 @@ spread noise rather than real adverse movement.
 | Setting | Default | Notes |
 |---|---|---|
 | `SCALPER_MIN_ALIGNMENT_SCORE` | `0.55` | M1+M5 structural alignment required. |
-| `SCALPER_MIN_TICK_SCORE` | `0.55` | Tick momentum composite required. |
+| `SCALPER_MIN_TICK_SCORE` | `0.50` | Tick momentum composite required. |
 | `SCALPER_MIN_CANDLE_SCORE` | `0.30` | Forming candle direction strength required. |
 | `SCALPER_MIN_TICK_VELOCITY` | `1.0` | Minimum ticks/second (measured over 5s window). |
 | `SCALPER_M5_EMA_PERIOD` | `10` | EMA period for M5 trend context. |

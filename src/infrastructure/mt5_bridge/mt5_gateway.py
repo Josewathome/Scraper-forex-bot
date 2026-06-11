@@ -546,6 +546,50 @@ class MT5Gateway:
                 }
         return None
 
+    def get_position_realized_pnl(self, ticket: int) -> Optional[Dict[str, Any]]:
+        """
+        Broker-truth net realised P&L for a closed position, summed over ALL of
+        its deals (entry + every partial/full close), including swap and
+        commission, in account currency.
+
+        This is the ONLY trustworthy P&L source — never reconstruct from MFE or
+        intended TP/SL. Returns None when history is unavailable so callers can
+        fall back to a real (not fabricated) estimate and log loudly.
+        """
+        if not self._ensure_ready():
+            return None
+        import datetime as _dt
+        deals = mt5.history_deals_get(position=ticket)
+        if deals is None or len(deals) == 0:
+            # History may not be selected yet — select a recent window and retry.
+            try:
+                mt5.history_select(_dt.datetime.now() - _dt.timedelta(days=3),
+                                   _dt.datetime.now() + _dt.timedelta(days=1))
+            except Exception as exc:
+                logger.debug("history_select failed for position %s: %s", ticket, exc)
+            deals = mt5.history_deals_get(position=ticket)
+        if deals is None or len(deals) == 0:
+            logger.warning("get_position_realized_pnl: no deals for position %s", ticket)
+            return None
+
+        total_profit = 0.0
+        out_volume   = 0.0
+        out_price: Optional[float] = None
+        out_time:  Optional[int]   = None
+        for d in deals:
+            total_profit += float(d.profit) + float(d.swap) + float(getattr(d, "commission", 0.0))
+            if d.entry == mt5.DEAL_ENTRY_OUT:
+                out_price   = float(d.price)
+                out_time    = int(d.time)
+                out_volume += float(d.volume)
+        return {
+            "ticket": int(ticket),
+            "profit": float(total_profit),
+            "price":  out_price,
+            "time":   out_time,
+            "volume": float(out_volume),
+        }
+
     # ── Positions ─────────────────────────────────────────────────
 
     def get_open_positions(self) -> List[Dict[str, Any]]:

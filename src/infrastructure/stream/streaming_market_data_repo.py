@@ -106,6 +106,18 @@ class StreamingMarketDataRepo(IMarketDataRepository):
     def get_tick_value(self, symbol: str) -> float:
         return self._fallback.get_tick_value(symbol)
 
+    def get_tick_size(self, symbol: str) -> float:
+        return self._fallback.get_tick_size(symbol)
+
+    def get_pip_value(self, symbol: str) -> float:
+        return self._fallback.get_pip_value(symbol)
+
+    def get_volume_constraints(self, symbol: str):
+        return self._fallback.get_volume_constraints(symbol)
+
+    def get_symbol_meta(self, symbol: str):
+        return self._fallback.get_symbol_meta(symbol)
+
     def get_symbol_digits(self, symbol: str) -> int:
         return self._fallback.get_symbol_digits(symbol)
 

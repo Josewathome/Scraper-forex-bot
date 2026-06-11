@@ -83,22 +83,22 @@ class SpreadCalculator:
 
     def get_broker_cost(self, symbol: str) -> BrokerCost:
         digits     = self._md.get_symbol_digits(symbol)
-        tick_value = self._md.get_tick_value(symbol)
+        pip_value  = self._md.get_pip_value(symbol)   # per-pip value, account ccy, per lot
         pip_calc   = PipCalculator(digits=digits)
 
         spread_pips = self._get_spread_pips(symbol, pip_calc)
         commission  = self._commission_map.get(symbol, self._commission)
 
         cost = BrokerCost(
-            spread_pips=    spread_pips,
-            commission_usd= commission,
-            tick_value=     tick_value,
+            spread_pips=        spread_pips,
+            commission_per_lot= commission,
+            pip_value_per_lot=  pip_value,
         )
         logger.debug(
-            "BrokerCost %s | spread=%.2f pips | commission=%.2f | "
-            "tick_val=%.4f | total_cost=%.2f pips",
+            "BrokerCost %s | spread=%.2f pips | commission=%.2f/lot | "
+            "pip_value=%.4f | round_trip_cost=%.2f pips",
             symbol, spread_pips, commission,
-            tick_value, cost.total_cost_pips,
+            pip_value, cost.round_trip_cost_pips(),
         )
         return cost
 

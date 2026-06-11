@@ -62,9 +62,12 @@ class _OpenTradeState:
     tp1_hit:          bool  = False
     tp2_hit:          bool  = False
     lot_size:         float = 0.0
+    initial_lot:      float = 0.0
+    pip_value:        float = 0.0   # per-pip money value per 1.0 lot, account ccy
     initial_risk:     float = 0.0
     mfe_price:        float = 0.0
     accumulated_pips: float = 0.0
+    realized_money:   float = 0.0   # money banked on partial closes (price-based, non-MFE)
     digits:           int   = 5
     grade:            str   = "B"
     created_at:       datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
@@ -114,7 +117,7 @@ class EntryCandidate:
     tp2_price:   float
     broker_cost: BrokerCost
     pip_calc:    PipCalculator
-    tick_value:  float
+    pip_value:   float          # per-pip money value per 1.0 lot, account ccy
     digits:      int
     is_phase2:   bool = False
 
@@ -156,6 +159,7 @@ class ExecutionService:
         self._trade_states: Dict[int, _OpenTradeState]          = {}
         self._loss_streak:  Dict[str, int]                      = {}
         self._streak_pause: Dict[str, Optional[datetime]]       = {}
+        self._reversal_cooldown: Dict[str, datetime]            = {}
         self._eval_ids:     Dict[int, str]                      = {}
         self._mfe_last_logged: Dict[int, datetime]              = {}
 
@@ -163,6 +167,40 @@ class ExecutionService:
 
     def open_count_for_symbol(self, symbol: str) -> int:
         return sum(1 for p in self._tr.get_open_positions() if p.symbol == symbol)
+
+    def is_symbol_paused(self, symbol: str, now: Optional[datetime] = None) -> bool:
+        """
+        True while a symbol is in a loss-streak cooldown. Enforced by EntryGate
+        as a hard gate so the bot actually stops after a run of losses (the old
+        code tracked the streak but never blocked on it).
+        """
+        until = self._streak_pause.get(symbol)
+        if until is None:
+            return False
+        now = now or datetime.now(tz=timezone.utc)
+        if now >= until:
+            self._streak_pause[symbol] = None
+            return False
+        return True
+
+    def is_reversal_cooldown(self, symbol: str, now: Optional[datetime] = None) -> bool:
+        """
+        True while a symbol is in a post-reversal cooldown — blocks re-entry churn
+        after the bot has just flipped/closed a position against a reversal.
+        """
+        until = self._reversal_cooldown.get(symbol)
+        if until is None:
+            return False
+        now = now or datetime.now(tz=timezone.utc)
+        if now >= until:
+            self._reversal_cooldown[symbol] = None
+            return False
+        return True
+
+    def _arm_reversal_cooldown(self, symbol: str) -> None:
+        secs = getattr(config, "REVERSAL_REENTRY_COOLDOWN_SEC", 120)
+        if secs and secs > 0:
+            self._reversal_cooldown[symbol] = datetime.now(tz=timezone.utc) + timedelta(seconds=secs)
 
     def has_tp1_hit_for_symbol(self, symbol: str) -> bool:
         return any(s.tp1_hit for s in self._trade_states.values() if s.symbol == symbol)
@@ -348,21 +386,13 @@ class ExecutionService:
                 # Thesis degraded — close losing trades outright; partial exit only when in profit
                 if not in_profit and act:
                     duration_min = (now - state.created_at).total_seconds() / 60
-                    live_pips  = (pip_calc.price_to_pips(price - state.entry)
-                                  if trade_dir == Direction.BULLISH
-                                  else pip_calc.price_to_pips(state.entry - price))
-                    total_pips = state.accumulated_pips + live_pips
-                    _outcome   = "win" if total_pips > 0 else "loss"
-                    self._tr.close_trade(ticket)
-                    self._trade_states.pop(ticket, None)
-                    self._log_trade_summary(pos, state, pip_calc)
-                    self._journal_close(ticket, total_pips, _outcome)
-                    self._update_streak(symbol, total_pips)
-                    logger.info(
-                        "TRADE CLOSED action=reeval_losing_exit | %s ticket=%s | "
-                        "cont=%.2f | pips=%.1f | held=%.1fmin",
-                        symbol, ticket, cont, total_pips, duration_min,
-                    )
+                    if self._tr.close_trade(ticket):
+                        self._finalize_close(ticket, state, action="reeval_losing_exit")
+                        logger.info(
+                            "REEVAL_LOSING_EXIT [%s] ticket=%s | cont=%.2f | held=%.1fmin",
+                            symbol, ticket, cont, duration_min,
+                        )
+                        continue  # trade closed — skip reversal checks
                 elif in_profit and profit_ratio >= 0.8 and not state.tp1_hit and act:
                     close_pct = 0.50
                     close_vol = max(
@@ -374,6 +404,7 @@ class ExecutionService:
                         live_pips = (pip_calc.price_to_pips(price - state.entry)
                                      if trade_dir == Direction.BULLISH
                                      else pip_calc.price_to_pips(state.entry - price))
+                        state.realized_money  += live_pips * state.pip_value * close_vol
                         state.lot_size         = max(0.0, state.lot_size - close_vol)
                         state.accumulated_pips += live_pips * close_pct
                         logger.info(
@@ -385,87 +416,58 @@ class ExecutionService:
             else:
                 # cont < EXIT_THRESHOLD — thesis invalidated, close the position
                 if act:
-                    live_pips  = (pip_calc.price_to_pips(price - state.entry)
-                                  if trade_dir == Direction.BULLISH
-                                  else pip_calc.price_to_pips(state.entry - price))
-                    total_pips = state.accumulated_pips + live_pips
-                    _outcome   = "win" if total_pips > 0 else "loss"
-                    self._tr.close_trade(ticket)
-                    self._trade_states.pop(ticket, None)
-                    self._log_trade_summary(pos, state, pip_calc)
-                    self._journal_close(ticket, total_pips, _outcome)
-                    self._update_streak(symbol, total_pips)
-                    logger.info(
-                        "REEVAL_EXIT [%s] ticket=%s %s — thesis invalidated (cont=%.2f) | "
-                        "pips=%.1f | reeval_count=%d",
-                        symbol, ticket, trade_dir.value.upper(),
-                        cont, total_pips, state.reeval_count,
-                    )
-                    continue  # trade closed, skip reversal check
+                    if self._tr.close_trade(ticket):
+                        self._finalize_close(ticket, state, action="reeval_exit")
+                        logger.info(
+                            "REEVAL_EXIT [%s] ticket=%s %s — thesis invalidated (cont=%.2f) | reeval=%d",
+                            symbol, ticket, trade_dir.value.upper(), cont, state.reeval_count,
+                        )
+                    continue  # trade closed (or close attempted) — skip reversal check
 
             # ── 3. Reversal detection ──────────────────────────────────
             # Two triggers:
             # (a) Fresh opposing signal at or above REVERSAL_THRESHOLD — full confidence reversal.
             # (b) Trade already in defensive/losing mode AND M1 structure has fully flipped
-            #     against the trade direction (struct_score == 0.0) — structural reversal even
-            #     without a fully-formed opposing signal.  Threshold is lowered to 0.50 when
-            #     defensive because the market has already shown weakness.
+            #     against the trade direction — structural reversal even without a fresh signal.
             effective_reversal_conf = REVERSAL_THRESHOLD
             if state.defensive_mode and not in_profit:
-                # Lower reversal threshold when already losing + defensive.
-                # If recovery conviction is also low, lower it further.
                 if rcv_score is not None and rcv_score <= 0.35:
                     effective_reversal_conf = 0.45  # market physics confirm the reversal
                 else:
                     effective_reversal_conf = 0.55
 
-            # Structural reversal: if M1 BOS has fully confirmed opposite direction,
-            # exit without waiting for a fresh signal (struct_score is 0.0 when fully reversed).
-            struct_score = self._assess_continuation(
-                state, None, structure, price, pip_calc, now
-            )  # recompute without signal to isolate structure component
-            struct_reversed = (struct_score * 0.40) == 0.0 and cont < DEFENSIVE_THRESHOLD
+            # Structural reversal: use the ISOLATED structure factor (0.0 only when
+            # M1 structure has fully flipped against the trade). The previous code
+            # multiplied the full continuation score by 0.40 and checked == 0.0,
+            # which could never be true — this is the corrected, reachable check.
+            struct_factor   = self._structure_factor(state, structure)
+            struct_reversed = (struct_factor == 0.0) and cont < DEFENSIVE_THRESHOLD
 
             if act and struct_reversed and state.defensive_mode and not in_profit:
                 duration_min = (now - state.created_at).total_seconds() / 60
-                live_pips  = (pip_calc.price_to_pips(price - state.entry)
-                              if trade_dir == Direction.BULLISH
-                              else pip_calc.price_to_pips(state.entry - price))
-                total_pips = state.accumulated_pips + live_pips
-                _outcome   = "win" if total_pips > 0 else "loss"
-                self._tr.close_trade(ticket)
-                self._trade_states.pop(ticket, None)
-                self._log_trade_summary(pos, state, pip_calc)
-                self._journal_close(ticket, total_pips, _outcome)
-                self._update_streak(symbol, total_pips)
-                logger.info(
-                    "STRUCTURAL_REVERSAL_EXIT [%s] ticket=%s | M1 structure fully reversed "
-                    "against trade | cont=%.2f | pips=%.1f | held=%.1fmin",
-                    symbol, ticket, cont, total_pips, duration_min,
-                )
+                if self._tr.close_trade(ticket):
+                    self._finalize_close(ticket, state, action="structural_reversal_exit")
+                    self._arm_reversal_cooldown(symbol)
+                    logger.info(
+                        "STRUCTURAL_REVERSAL_EXIT [%s] ticket=%s | M1 structure fully reversed "
+                        "| cont=%.2f | held=%.1fmin",
+                        symbol, ticket, cont, duration_min,
+                    )
                 continue
 
             if (fresh_signal is not None
                     and fresh_signal.direction != trade_dir
                     and fresh_signal.confidence >= effective_reversal_conf
                     and act):
-                live_pips  = (pip_calc.price_to_pips(price - state.entry)
-                              if trade_dir == Direction.BULLISH
-                              else pip_calc.price_to_pips(state.entry - price))
-                total_pips = state.accumulated_pips + live_pips
-                _outcome   = "win" if total_pips > 0 else "loss"
-                self._tr.close_trade(ticket)
-                self._trade_states.pop(ticket, None)
-                self._log_trade_summary(pos, state, pip_calc)
-                self._journal_close(ticket, total_pips, _outcome)
-                self._update_streak(symbol, total_pips)
-                logger.info(
-                    "REVERSAL_EXIT [%s] ticket=%s | opposing %s signal conf=%.2f ≥ %.2f "
-                    "— closed pips=%.1f",
-                    symbol, ticket,
-                    fresh_signal.direction.value.upper(), fresh_signal.confidence,
-                    effective_reversal_conf, total_pips,
-                )
+                if self._tr.close_trade(ticket):
+                    self._finalize_close(ticket, state, action="reversal_exit")
+                    self._arm_reversal_cooldown(symbol)
+                    logger.info(
+                        "REVERSAL_EXIT [%s] ticket=%s | opposing %s signal conf=%.2f ≥ %.2f",
+                        symbol, ticket,
+                        fresh_signal.direction.value.upper(), fresh_signal.confidence,
+                        effective_reversal_conf,
+                    )
 
     # ── Trade execution ───────────────────────────────────────────────
 
@@ -475,29 +477,32 @@ class ExecutionService:
         signal = candidate.signal
         trade  = self._build_trade(
             signal, candidate.broker_cost, candidate.pip_calc,
-            candidate.tick_value, candidate.risk_pct,
+            candidate.pip_value, candidate.risk_pct,
         )
         if trade is None:
             return None
 
-        # Exact margin check using live MT5 figures
+        # Exact margin check using live MT5 figures (FAIL CLOSED if unknown).
         req_margin  = (self._tr.get_required_margin(trade)
                        if hasattr(self._tr, "get_required_margin") else None)
         free_margin = self._tr.get_free_margin()
         safety      = getattr(config, "MARGIN_SAFETY_FACTOR", 1.5)
-        if req_margin is not None and free_margin is not None:
-            if req_margin * safety > free_margin:
-                logger.warning(
-                    "MARGIN SKIP | %s | required=%.2f × safety=%.1f = %.2f > free=%.2f",
-                    symbol, req_margin, safety, req_margin * safety, free_margin,
-                )
-                return None
-            logger.debug(
-                "MARGIN OK | %s | required=%.2f free=%.2f (safety=%.1fx)",
-                symbol, req_margin, free_margin, safety,
+        if req_margin is None or free_margin is None:
+            logger.error(
+                "MARGIN ABORT | %s | required/free margin unreadable (req=%s free=%s) — rejecting",
+                symbol, req_margin, free_margin,
             )
-        else:
-            logger.debug("MARGIN CHECK unavailable for %s — proceeding (MT5 enforces).", symbol)
+            return None
+        if req_margin * safety > free_margin:
+            logger.warning(
+                "MARGIN SKIP | %s | required=%.2f × safety=%.1f = %.2f > free=%.2f",
+                symbol, req_margin, safety, req_margin * safety, free_margin,
+            )
+            return None
+        logger.debug(
+            "MARGIN OK | %s | required=%.2f free=%.2f (safety=%.1fx)",
+            symbol, req_margin, free_margin, safety,
+        )
 
         ticket = None
         try:
@@ -512,15 +517,30 @@ class ExecutionService:
         trade.mt5_ticket = ticket
         trade.status     = TradeStatus.OPEN
 
-        initial_risk = abs(signal.entry_price - signal.stop_loss)
+        # Anchor ALL tracked levels to the ACTUAL fill price and the actual
+        # broker SL/TP that place_trade set (it updates trade.* to the live fill
+        # and the stop-level-nudged SL/TP). Re-anchor the software TP1/TP2 by the
+        # fill slippage so the tiered targets stay at the intended distance from
+        # the real entry, not the (now stale) signal-time price.
+        fill_delta   = trade.entry_price - signal.entry_price
+        tp1_anchored = candidate.tp1_price + fill_delta
+        tp2_anchored = trade.take_profit            # broker TP2 backstop (already at fill-ref)
+        initial_risk = abs(trade.entry_price - trade.stop_loss)
+        if abs(fill_delta) > 0:
+            logger.info(
+                "FILL_ANCHOR [%s] signal=%.5f fill=%.5f Δ=%.5f | SL=%.5f TP1=%.5f TP2=%.5f",
+                symbol, signal.entry_price, trade.entry_price, fill_delta,
+                trade.stop_loss, tp1_anchored, tp2_anchored,
+            )
         confidence   = float(candidate.trade_score) / 100.0
         state = _OpenTradeState(
             symbol=symbol, direction=signal.direction,
-            entry=signal.entry_price, original_sl=signal.stop_loss,
-            current_sl=signal.stop_loss, take_profit=signal.take_profit,
-            tp1_price=candidate.tp1_price, tp2_price=candidate.tp2_price,
-            lot_size=trade.lot_size, initial_risk=initial_risk,
-            mfe_price=signal.entry_price,
+            entry=trade.entry_price, original_sl=trade.stop_loss,
+            current_sl=trade.stop_loss, take_profit=trade.take_profit,
+            tp1_price=tp1_anchored, tp2_price=tp2_anchored,
+            lot_size=trade.lot_size, initial_lot=trade.lot_size,
+            pip_value=candidate.pip_value, initial_risk=initial_risk,
+            mfe_price=trade.entry_price,
             digits=candidate.digits, grade=candidate.grade,
             created_at=datetime.now(tz=timezone.utc),
             entry_confidence=confidence,
@@ -595,8 +615,14 @@ class ExecutionService:
                     entry=pos.entry_price, original_sl=pos.stop_loss,
                     current_sl=pos.stop_loss, take_profit=pos.take_profit,
                     tp1_price=tp1_price, tp2_price=tp2_price,
-                    lot_size=pos.lot_size, digits=digits,
+                    lot_size=pos.lot_size, initial_lot=pos.lot_size,
+                    mfe_price=pos.entry_price, digits=digits,
                 )
+                # Per-pip value for analytics pip conversion (best-effort).
+                try:
+                    state.pip_value = self._md.get_pip_value(symbol)
+                except Exception:
+                    state.pip_value = 0.0
                 self._trade_states[ticket] = state
 
             price = self._md.get_current_price(symbol)
@@ -657,11 +683,11 @@ class ExecutionService:
                     closed = (self._tr.partial_close_trade(ticket, close_vol, "TP1")
                               if hasattr(self._tr, "partial_close_trade") else False)
                     if closed:
+                        tp1_pips = pip_calc.price_to_pips(abs(state.tp1_price - state.entry))
+                        state.realized_money  += tp1_pips * state.pip_value * close_vol
                         state.lot_size         = max(0.0, state.lot_size - close_vol)
                         state.tp1_hit          = True
-                        state.accumulated_pips += pip_calc.price_to_pips(
-                            abs(state.tp1_price - state.entry)
-                        )
+                        state.accumulated_pips += tp1_pips
                         # Move SL to profit-lock level (entry + fraction of initial risk)
                         profit_lock = state.initial_risk * getattr(config, "TP1_PROFIT_LOCK_R", 0.3)
                         lock_sl = (state.entry + profit_lock if state.direction == Direction.BULLISH
@@ -688,11 +714,11 @@ class ExecutionService:
                     closed = (self._tr.partial_close_trade(ticket, close_vol, "TP2")
                               if hasattr(self._tr, "partial_close_trade") else False)
                     if closed:
+                        tp2_pips = pip_calc.price_to_pips(abs(state.tp2_price - state.entry))
+                        state.realized_money  += tp2_pips * state.pip_value * close_vol
                         state.lot_size         = max(0.0, state.lot_size - close_vol)
                         state.tp2_hit          = True
-                        state.accumulated_pips += pip_calc.price_to_pips(
-                            abs(state.tp2_price - state.entry)
-                        )
+                        state.accumulated_pips += tp2_pips
                         logger.info(
                             "TP2 hit | ticket=%s | closed %.2f lots | runner=%.2f lots",
                             ticket, close_vol, state.lot_size,
@@ -717,19 +743,12 @@ class ExecutionService:
                     action       = "time_exit_cutloss"
 
             if should_close and getattr(config, "MONITOR_ACT_ON_SIGNALS", True):
-                final_pips = (pip_calc.price_to_pips(price - state.entry)
-                              if state.direction == Direction.BULLISH
-                              else pip_calc.price_to_pips(state.entry - price))
-                total_pips = state.accumulated_pips + final_pips
-                _outcome   = "win" if total_pips > 0 else "loss"
-                self._tr.close_trade(ticket)
-                self._log_trade_summary(pos, state, pip_calc)
-                self._journal_close(ticket, total_pips, _outcome)
-                self._update_streak(symbol, total_pips)
-                logger.info(
-                    "TRADE CLOSED action=%s | %s ticket=%s | pips=%.1f | held=%.1fmin",
-                    action, symbol, ticket, total_pips, duration_min,
-                )
+                if self._tr.close_trade(ticket):
+                    self._finalize_close(ticket, state, action=action)
+                    logger.info(
+                        "TIME_EXIT [%s] action=%s ticket=%s | held=%.1fmin",
+                        symbol, action, ticket, duration_min,
+                    )
 
     # ── Trade Guardian: analytical helpers ───────────────────────────
 
@@ -757,30 +776,10 @@ class ExecutionService:
         factor can override the others.  A trade needs ALL three components
         to remain healthy to score above the HOLD threshold.
         """
-        from src.strategy.structure_state import StructureState
-
         trade_dir = state.direction
 
         # ── Factor 1: M1 structure (40%) ──────────────────────────────
-        # Reads the live BOS/CHoCH state updated each M1 close.
-        struct_score = 0.50  # neutral default (not enough data yet)
-        m1_state     = structure.get_state(Timeframe.M1)
-        bos_dir      = structure.get_last_bos_direction(Timeframe.M1)
-
-        if trade_dir == Direction.BULLISH:
-            if   m1_state == StructureState.BULLISH_TREND:                                        struct_score = 1.00
-            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BULLISH:     struct_score = 0.80
-            elif m1_state == StructureState.MITIGATION_ZONE:                                      struct_score = 0.65
-            elif m1_state == StructureState.RANGING:                                              struct_score = 0.35
-            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BEARISH:     struct_score = 0.10
-            elif m1_state == StructureState.BEARISH_TREND:                                        struct_score = 0.00
-        else:  # BEARISH trade
-            if   m1_state == StructureState.BEARISH_TREND:                                        struct_score = 1.00
-            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BEARISH:     struct_score = 0.80
-            elif m1_state == StructureState.MITIGATION_ZONE:                                      struct_score = 0.65
-            elif m1_state == StructureState.RANGING:                                              struct_score = 0.35
-            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BULLISH:     struct_score = 0.10
-            elif m1_state == StructureState.BULLISH_TREND:                                        struct_score = 0.00
+        struct_score = self._structure_factor(state, structure)
 
         # ── Factor 2: fresh signal alignment (35%) ────────────────────
         # fresh_signal=None means "no clear setup at this M1 close" — neutral (0.50).
@@ -810,6 +809,40 @@ class ExecutionService:
 
         continuation = (struct_score * 0.40 + signal_score * 0.35 + pnl_score * 0.25)
         return round(max(0.0, min(1.0, continuation)), 3)
+
+    @staticmethod
+    def _structure_factor(state: "_OpenTradeState", structure: "StructureStateManager") -> float:
+        """
+        Isolated M1-structure score (0.0–1.0) in the trade's direction.
+
+        0.0 means M1 structure has fully flipped AGAINST the trade — used both as
+        the 40% factor of the continuation score and as the structural-reversal
+        trigger. Defaults to neutral 0.50 when structure data is missing so we
+        never spuriously read a flip.
+        """
+        from src.strategy.structure_state import StructureState
+
+        if structure is None:
+            return 0.50
+        trade_dir = state.direction
+        m1_state  = structure.get_state(Timeframe.M1)
+        bos_dir   = structure.get_last_bos_direction(Timeframe.M1)
+
+        if trade_dir == Direction.BULLISH:
+            if   m1_state == StructureState.BULLISH_TREND:                                    return 1.00
+            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BULLISH: return 0.80
+            elif m1_state == StructureState.MITIGATION_ZONE:                                  return 0.65
+            elif m1_state == StructureState.RANGING:                                          return 0.35
+            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BEARISH: return 0.10
+            elif m1_state == StructureState.BEARISH_TREND:                                    return 0.00
+        else:
+            if   m1_state == StructureState.BEARISH_TREND:                                    return 1.00
+            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BEARISH: return 0.80
+            elif m1_state == StructureState.MITIGATION_ZONE:                                  return 0.65
+            elif m1_state == StructureState.RANGING:                                          return 0.35
+            elif m1_state == StructureState.STRUCTURE_BREAK and bos_dir == Direction.BULLISH: return 0.10
+            elif m1_state == StructureState.BULLISH_TREND:                                    return 0.00
+        return 0.50
 
     def _compute_structural_sl(
         self,
@@ -910,45 +943,116 @@ class ExecutionService:
 
     # ── Internal utilities ────────────────────────────────────────────
 
-    def _log_trade_summary(self, trade, state: _OpenTradeState, pip_calc: PipCalculator) -> None:
-        sl_pips       = pip_calc.price_to_pips(abs(state.initial_risk))
-        mfe_pips      = pip_calc.price_to_pips(abs(state.mfe_price - state.entry))
-        realized_pips = state.accumulated_pips
-        efficiency    = realized_pips / mfe_pips if mfe_pips > 0 else 0
+    def _log_trade_summary(self, state: _OpenTradeState, pip_calc: PipCalculator,
+                           pnl_money: float) -> None:
+        sl_pips    = pip_calc.price_to_pips(abs(state.initial_risk))
+        mfe_pips   = pip_calc.price_to_pips(abs(state.mfe_price - state.entry))
+        pnl_pips   = self._money_to_pips(state, pnl_money)
+        efficiency = pnl_pips / mfe_pips if mfe_pips > 0 else 0
         logger.info(
             "TRADE SUMMARY | %s %s | entry_conf=%.2f | SL=%.1fpips | MFE=%.1fpips | "
-            "PnL=%.1fpips | eff=%.0f%% | TP1=%s TP2=%s | reeval=%d | last_cont=%.2f",
+            "PnL=%.2f %s (≈%.1fpips) | eff=%.0f%% | TP1=%s TP2=%s | reeval=%d | last_cont=%.2f",
             state.symbol, state.direction.value.upper(),
             state.entry_confidence, sl_pips, mfe_pips,
-            realized_pips, efficiency * 100,
+            pnl_money, self._currency, pnl_pips, efficiency * 100,
             state.tp1_hit, state.tp2_hit,
             state.reeval_count, state.last_reeval_score,
         )
 
     def _prune_closed_positions(self) -> None:
-        """Remove tracking state for positions that MT5 has already closed."""
+        """
+        Reconcile tracking state for positions MT5 has already closed
+        (server-side SL/TP, or manual). Uses BROKER-TRUTH realised P&L — never
+        an MFE/intended-level reconstruction.
+        """
         open_tickets = {int(p.mt5_ticket or p.id) for p in self._tr.get_open_positions()}
         stale = [t for t in list(self._trade_states.keys()) if t not in open_tickets]
         for t in stale:
-            state = self._trade_states.pop(t, None)
+            state = self._trade_states.get(t)
             if state is None:
                 continue
-            pip_calc       = PipCalculator(digits=state.digits)
-            direction_sign = 1 if state.direction == Direction.BULLISH else -1
-            # Use MFE price as a conservative proxy for the close price
-            final_pips     = direction_sign * pip_calc.price_to_pips(
-                abs(state.mfe_price - state.entry)
-            )
-            total_pips = state.accumulated_pips + final_pips
-            _outcome   = "win" if total_pips > 0 else "loss"
-            self._journal_close(t, total_pips, _outcome)
-            self._update_streak(state.symbol, total_pips)
+            self._finalize_close(t, state, action="broker_close")
 
-    def _update_streak(self, symbol: str, total_pips: float) -> None:
+    # ── Broker-truth close finalisation ───────────────────────────────
+
+    def _finalize_close(self, ticket: int, state: "_OpenTradeState", action: str) -> float:
+        """
+        Single funnel for EVERY trade close. Reads the broker's realised net P&L
+        (money, account currency) from deal history and journals THAT. Falls back
+        to a real price-based estimate (never MFE) only if history is unavailable,
+        and logs that loudly. Returns the realised money P&L.
+        """
+        pip_calc = PipCalculator(digits=state.digits)
+        money: Optional[float] = None
+        source = "broker"
+        try:
+            deal = self._tr.get_position_realized_pnl(ticket)
+            if deal is not None and deal.get("profit") is not None:
+                money = float(deal["profit"])
+        except Exception as exc:
+            logger.error("CLOSE_PNL [%s] ticket=%s realized P&L query failed: %s",
+                         state.symbol, ticket, exc)
+
+        if money is None:
+            money = self._estimate_money_pnl(state)
+            source = "ESTIMATE(no broker history)"
+            logger.error(
+                "CLOSE_PNL [%s] ticket=%s broker realised P&L unavailable — "
+                "using price-based estimate=%.2f (NOT MFE)",
+                state.symbol, ticket, money,
+            )
+
+        outcome    = "win" if money > 0 else "loss" if money < 0 else "breakeven"
+        pips_equiv = self._money_to_pips(state, money)
+
+        # Drop tracking BEFORE side-effects so a re-entry can't double count.
+        self._trade_states.pop(ticket, None)
+        self._log_trade_summary(state, pip_calc, money)
+        self._journal_close(ticket, money, outcome, pips_equiv)
+        self._update_streak(state.symbol, money)
+        logger.info(
+            "TRADE CLOSED action=%s | %s ticket=%s | pnl=%.2f %s [%s] | pips≈%.1f | grade=%s",
+            action, state.symbol, ticket, money, self._currency, source,
+            pips_equiv, state.grade,
+        )
+        return money
+
+    def _estimate_money_pnl(self, state: "_OpenTradeState") -> float:
+        """
+        Real (non-MFE) fallback P&L estimate in account currency: money already
+        banked on partial closes + mark-to-market of the remaining lot at the
+        CURRENT price. Used only when broker deal history is unavailable.
+        """
+        try:
+            price = self._md.get_current_price(state.symbol)
+        except Exception:
+            price = state.entry
+        pip_calc = PipCalculator(digits=state.digits)
+        if state.direction == Direction.BULLISH:
+            live_pips = pip_calc.price_to_pips(price - state.entry) if price >= state.entry \
+                        else -pip_calc.price_to_pips(state.entry - price)
+        else:
+            live_pips = pip_calc.price_to_pips(state.entry - price) if price <= state.entry \
+                        else -pip_calc.price_to_pips(price - state.entry)
+        remaining_money = live_pips * state.pip_value * max(0.0, state.lot_size)
+        return state.realized_money + remaining_money
+
+    @staticmethod
+    def _money_to_pips(state: "_OpenTradeState", money: float) -> float:
+        """
+        Approximate pips for analytics from broker money P&L. Sign is exact;
+        magnitude uses the initial lot and per-pip value. Returns 0 if unknown.
+        """
+        denom = state.pip_value * (state.initial_lot or state.lot_size)
+        if denom <= 0:
+            return 0.0
+        return round(money / denom, 2)
+
+    def _update_streak(self, symbol: str, pnl_money: float) -> None:
         """Track loss streak for analytics and alerting (no trading pause by default)."""
         now    = datetime.now(tz=timezone.utc)
         streak = self._loss_streak.get(symbol, 0)
-        if total_pips < 0:
+        if pnl_money < 0:
             streak += 1
             self._loss_streak[symbol] = streak
             max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES",  5)
@@ -978,7 +1082,9 @@ class ExecutionService:
                 "current_sl": s.current_sl, "take_profit": s.take_profit,
                 "tp1_price": s.tp1_price, "tp2_price": s.tp2_price,
                 "tp1_hit": s.tp1_hit, "tp2_hit": s.tp2_hit,
-                "lot_size": s.lot_size, "initial_risk": s.initial_risk,
+                "lot_size": s.lot_size, "initial_lot": s.initial_lot,
+                "pip_value": s.pip_value, "realized_money": s.realized_money,
+                "initial_risk": s.initial_risk,
                 "mfe_price": s.mfe_price, "accumulated_pips": s.accumulated_pips,
                 "digits": s.digits, "grade": s.grade,
                 "created_at": s.created_at.isoformat(),
@@ -1004,7 +1110,11 @@ class ExecutionService:
                     current_sl=float(s["current_sl"]), take_profit=float(s["take_profit"]),
                     tp1_price=float(s["tp1_price"]), tp2_price=float(s["tp2_price"]),
                     tp1_hit=bool(s["tp1_hit"]), tp2_hit=bool(s["tp2_hit"]),
-                    lot_size=float(s["lot_size"]), initial_risk=float(s["initial_risk"]),
+                    lot_size=float(s["lot_size"]),
+                    initial_lot=float(s.get("initial_lot", s["lot_size"])),
+                    pip_value=float(s.get("pip_value", 0.0)),
+                    realized_money=float(s.get("realized_money", 0.0)),
+                    initial_risk=float(s["initial_risk"]),
                     mfe_price=float(s["mfe_price"]), accumulated_pips=float(s["accumulated_pips"]),
                     digits=int(s["digits"]), grade=s.get("grade", "B"),
                     created_at=created, sl_trailed=bool(s.get("sl_trailed", False)),
@@ -1022,9 +1132,10 @@ class ExecutionService:
         for sym, iso in data.get("streak_pause", {}).items():
             self._streak_pause[sym] = datetime.fromisoformat(iso) if iso else None
 
-    def _journal_close(self, ticket: int, pips: float, outcome: str) -> None:
+    def _journal_close(self, ticket: int, pnl_money: float, outcome: str,
+                       pips: float = 0.0) -> None:
         try:
-            self._journal.record_close(ticket, round(pips, 1), outcome)
+            self._journal.record_close(ticket, round(pnl_money, 2), outcome, round(pips, 2))
         except Exception as exc:
             logger.warning("Journal record_close failed ticket=%s: %s", ticket, exc)
 
@@ -1041,47 +1152,127 @@ class ExecutionService:
         signal:            TradeSignal,
         broker_cost:       BrokerCost,
         pip_calc:          PipCalculator,
-        tick_value:        float,
+        pip_value:         float,
         risk_pct_override: Optional[float] = None,
     ) -> Optional[Trade]:
-        balance    = self._tr.get_account_balance()
+        """
+        Size the trade from money risk using the CORRECT per-pip value, then fit
+        it to real MT5 margin and enforce an absolute money-risk ceiling.
+
+        Returns None (fail closed) when inputs are invalid or even the broker
+        minimum lot cannot be financed / would exceed the risk ceiling.
+        """
+        symbol  = signal.symbol
+        balance = self._tr.get_account_balance()
+        if balance is None or balance <= 0:
+            logger.error("BUILD_TRADE [%s] balance unreadable/≤0 (%s) — rejecting", symbol, balance)
+            return None
+        if pip_value is None or pip_value <= 0:
+            logger.error("BUILD_TRADE [%s] pip_value invalid (%s) — rejecting", symbol, pip_value)
+            return None
+
         eff_risk   = risk_pct_override if risk_pct_override is not None else self._risk_pct
         risk_params = RiskParameters(
             account_balance=balance, risk_percent=eff_risk,
-            commission_per_lot=broker_cost.commission_usd, min_rr_ratio=self._min_rr,
+            commission_per_lot=broker_cost.commission_per_lot, min_rr_ratio=self._min_rr,
             account_currency=self._currency,
         )
-        sl_pips  = pip_calc.price_to_pips(abs(signal.entry_price - signal.stop_loss))
-        raw_lot  = risk_params.lot_size(sl_pips, tick_value, pip_calc)
-        max_lot  = getattr(config, "MAX_LOT_SIZE", 10.0)
-        lot_size = max(0.01, min(max_lot, math.floor(raw_lot * 100) / 100))
+        sl_pips = pip_calc.price_to_pips(abs(signal.entry_price - signal.stop_loss))
+        if sl_pips <= 0:
+            logger.error("BUILD_TRADE [%s] sl_pips ≤ 0 — rejecting", symbol)
+            return None
 
-        # Cap lot size so the required margin never exceeds 40% of free margin.
-        # This prevents good signals from being blocked just because the risk-based
-        # lot size happens to be larger than the available margin allows.
-        # We always trade at least 0.01 lots (broker minimum); if even that
-        # exceeds 40% of free margin the margin gate in entry_gate.py will block.
+        raw_lot = risk_params.lot_size(sl_pips, pip_value)
+        if raw_lot <= 0:
+            logger.error("BUILD_TRADE [%s] computed raw_lot ≤ 0 — rejecting", symbol)
+            return None
+
+        # Broker volume constraints (min / max / step). Fail closed if unknown.
+        vmin, vmax, vstep = 0.01, getattr(config, "MAX_LOT_SIZE", 10.0), 0.01
+        try:
+            vc = self._md.get_volume_constraints(symbol)
+            if vc:
+                vmin, vmax, vstep = vc
+        except Exception as exc:
+            logger.warning("BUILD_TRADE [%s] volume constraints unreadable: %s — using defaults", symbol, exc)
+        vstep   = vstep if vstep and vstep > 0 else 0.01
+        max_lot = min(getattr(config, "MAX_LOT_SIZE", 10.0), vmax)
+        # Decimal places implied by the broker volume step (e.g. 0.01→2, 0.001→3)
+        # so rounding never corrupts sub-0.01-step instruments.
+        step_decimals = max(0, min(8, -int(math.floor(math.log10(vstep))))) if vstep < 1 else 0
+
+        def _round_step(v: float) -> float:
+            steps = math.floor(v / vstep + 1e-9)
+            return round(steps * vstep, step_decimals)
+
+        lot_size = _round_step(raw_lot)
+        lot_size = max(vmin, min(max_lot, lot_size))
+
+        # ── Fit to real MT5 margin (currency-correct, no leverage proxy) ──
+        safety = getattr(config, "MARGIN_SAFETY_FACTOR", 1.5)
         try:
             free_margin = self._tr.get_free_margin()
-            if free_margin and free_margin > 0:
-                safety = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
-                _ldiv  = getattr(config, "LEVERAGE_MARGIN_DIVISOR", 250.0)
-                margin_max_lots = math.floor(
-                    (free_margin * 0.40 / safety / _ldiv) * 100
-                ) / 100
-                margin_max_lots = max(0.01, margin_max_lots)
-                if lot_size > margin_max_lots:
-                    logger.info(
-                        "LOT_CAPPED [%s] risk_lots=%.2f → margin_lots=%.2f "
-                        "(free_margin=%.2f)",
-                        signal.symbol, lot_size, margin_max_lots, free_margin,
-                    )
-                    lot_size = margin_max_lots
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error("BUILD_TRADE [%s] free margin unreadable: %s — rejecting", symbol, exc)
+            return None
+        if free_margin is None or free_margin <= 0:
+            logger.error("BUILD_TRADE [%s] free margin %s — rejecting", symbol, free_margin)
+            return None
+
+        def _fits(volume: float) -> Optional[bool]:
+            """True/False if `volume` fits within free margin × safety; None if unknown."""
+            try:
+                req = self._tr.get_margin_for_volume(
+                    symbol, signal.direction, signal.entry_price, volume
+                )
+            except Exception:
+                req = None
+            if req is None:
+                return None
+            return (req * safety) <= free_margin
+
+        # Reduce by volume step until it fits, or reject at the minimum.
+        guard = 0
+        while lot_size >= vmin and guard < 1000:
+            fit = _fits(lot_size)
+            if fit is None:
+                logger.error(
+                    "BUILD_TRADE [%s] MT5 margin check unavailable — rejecting (fail closed)", symbol,
+                )
+                return None
+            if fit:
+                break
+            next_lot = _round_step(lot_size - vstep)
+            if next_lot < vmin or next_lot >= lot_size:
+                logger.info(
+                    "BUILD_TRADE [%s] even min lot %.2f does not fit free_margin=%.2f×%.1f — rejecting",
+                    symbol, vmin, free_margin, safety,
+                )
+                return None
+            lot_size = next_lot
+            guard += 1
+
+        # ── Absolute money-risk ceiling (fail closed) ──────────────
+        realized_risk_money = sl_pips * pip_value * lot_size
+        max_risk_money      = balance * (getattr(config, "MAX_TRADE_RISK_PCT", 3.0) / 100.0)
+        if realized_risk_money > max_risk_money * 1.0001:
+            logger.warning(
+                "BUILD_TRADE [%s] realized risk %.2f > ceiling %.2f (%.1f%% of %.2f) at min lot %.2f — rejecting",
+                symbol, realized_risk_money, max_risk_money,
+                getattr(config, "MAX_TRADE_RISK_PCT", 3.0), balance, lot_size,
+            )
+            return None
+
+        logger.info(
+            "SIZE [%s] balance=%.2f risk%%=%.2f sl=%.1fpips pip_val=%.4f → raw=%.4f lot=%.2f "
+            "| realized_risk=%.2f (%.2f%%)",
+            symbol, balance, eff_risk, sl_pips, pip_value, raw_lot, lot_size,
+            realized_risk_money, realized_risk_money / balance * 100,
+        )
+
         return Trade(
             id=str(uuid.uuid4()),
-            symbol=signal.symbol,
+            symbol=symbol,
             direction=signal.direction,
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
@@ -1089,6 +1280,6 @@ class ExecutionService:
             lot_size=lot_size,
             status=TradeStatus.PENDING,
             created_at=datetime.now(tz=timezone.utc),
-            commission=broker_cost.commission_usd * lot_size,
+            commission=broker_cost.commission_per_lot * lot_size,
             spread_cost=broker_cost.spread_pips,
         )

@@ -22,10 +22,6 @@ import src.config as config
 
 logger = logging.getLogger(__name__)
 
-# 1:400 leverage → lots × 250.0 = approximate required margin in account currency.
-# The old code used 200.0 (1:500) which was wrong for a 1:400 account.
-_LEVERAGE_DIVISOR = getattr(config, "LEVERAGE_MARGIN_DIVISOR", 250.0)
-
 
 class MarginManager:
     """
@@ -162,23 +158,28 @@ class MarginManager:
             # above (which already enforces A-priority for the last slot).
             pass
 
-        # ── 3. Equity reserve floor ───────────────────────────────────
+        # ── 3. Equity reserve floor (currency-correct, fail closed) ────
+        # Always keep MARGIN_RESERVE_PCT of equity as free margin. Free margin
+        # and equity are both in account currency (read live from MT5), so this
+        # is currency-agnostic — no leverage/USD proxy. If we cannot read these
+        # figures we reject rather than guess.
         try:
             free_margin = self._tr.get_free_margin()
-            if free_margin is not None and balance > 0:
-                equity      = self._compute_equity(balance)
-                reserve_pct = getattr(config, "MARGIN_RESERVE_PCT", 0.25)
-                reserve_amt = equity * reserve_pct
-                safety      = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
-                min_margin  = 0.01 * _LEVERAGE_DIVISOR * safety
-                if free_margin < reserve_amt + min_margin:
-                    return False, (
-                        f"EQUITY_RESERVE: free={free_margin:.2f} < "
-                        f"reserve={reserve_amt:.2f} (equity={equity:.2f} × {reserve_pct:.0%}) "
-                        f"+ min_trade={min_margin:.2f} | grade={grade}"
-                    )
+            if free_margin is None:
+                return False, "EQUITY_RESERVE: free margin unreadable — rejecting (fail closed)"
+            equity = self._compute_equity(balance)
+            if equity <= 0:
+                return False, f"EQUITY_RESERVE: equity={equity:.2f} ≤ 0 — rejecting"
+            reserve_pct = getattr(config, "MARGIN_RESERVE_PCT", 0.25)
+            reserve_amt = equity * reserve_pct
+            if free_margin < reserve_amt:
+                return False, (
+                    f"EQUITY_RESERVE: free={free_margin:.2f} < reserve={reserve_amt:.2f} "
+                    f"(equity={equity:.2f} × {reserve_pct:.0%}) | grade={grade}"
+                )
         except Exception as _e:
-            logger.debug("MarginManager equity reserve check error: %s", _e)
+            logger.error("MarginManager equity reserve check error: %s — rejecting (fail closed)", _e)
+            return False, f"EQUITY_RESERVE: check error {_e}"
 
         # ── 4. Currency correlation exposure limit ────────────────────
         max_ccy_exp    = getattr(config, "MAX_CURRENCY_EXPOSURE", 3)

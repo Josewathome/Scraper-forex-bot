@@ -86,11 +86,12 @@ class StrategyManager:
     """
     Central strategy coordinator.  One instance for the whole bot.
 
-    Key thresholds (all tunable — do not optimise on in-sample data):
-      MIN_ALIGNMENT_SCORE  = 0.70  (raised to 0.75 in RANGING regime)
-      MIN_TICK_SCORE       = 0.60
-      MIN_CANDLE_SCORE_ABS = 0.40  (absolute value)
-      MAX_VOLATILITY_BURST = 2.5   (tick range explosion — noise/news)
+    Key thresholds are read from config (single source of truth) and may be
+    relaxed within bounded floors by EntryContextScorer. Defaults:
+      SCALPER_MIN_ALIGNMENT_SCORE  = 0.55
+      SCALPER_MIN_TICK_SCORE       = 0.50
+      SCALPER_MIN_CANDLE_SCORE     = 0.30  (absolute value)
+      MAX_VOLATILITY_BURST         = 2.5   (tick range explosion — noise/news)
     """
 
     MIN_ALIGNMENT_SCORE  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.55)
@@ -261,10 +262,16 @@ class StrategyManager:
             logger.debug("ENTRY_CTX [%s]   → %s", symbol, r)
 
         # ── Gate 1: Alignment score (context-adapted threshold) ────────
-        if alignment.score < entry_ctx.effective_align_threshold:
+        # Ranging-regime suppression: M1 chop is the main source of false
+        # signals, so REQUIRE a higher alignment score in a ranging regime.
+        align_threshold = entry_ctx.effective_align_threshold
+        if alignment.regime == Regime.RANGING:
+            align_threshold += getattr(config, "RANGING_ALIGN_PENALTY", 0.10)
+        if alignment.score < align_threshold:
             logger.info(
-                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f | dir=%s",
-                symbol, alignment.score, entry_ctx.effective_align_threshold,
+                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f%s | dir=%s",
+                symbol, alignment.score, align_threshold,
+                " (ranging+penalty)" if alignment.regime == Regime.RANGING else "",
                 alignment.details.get("m1_dir", "NONE"),
             )
             return None
@@ -378,8 +385,10 @@ class StrategyManager:
                 tq.condition_score, tq.at_key_level,
             )
         except Exception as _tq_exc:
-            logger.debug("TradeQuality compute failed (non-fatal): %s", _tq_exc)
-            tq = None
+            # FAIL CLOSED: trade quality is a real gate. If it cannot be computed
+            # we cannot vouch for the entry — reject rather than wave it through.
+            logger.error("GATE7 BLOCK [%s] trade quality compute failed: %s — rejecting", symbol, _tq_exc)
+            return None
 
         # ── All gates passed — build signal ───────────────────────────
         confidence = (
@@ -424,7 +433,8 @@ class StrategyManager:
 
     def tick_snapshot(self, symbol: str) -> int:
         """Number of ticks currently in buffer."""
-        return len(self._tick.get(symbol) or [])
+        analyzer = self._tick.get(symbol)
+        return len(analyzer) if analyzer is not None else 0
 
     def spread_state(self, symbol: str) -> SpreadState:
         tick = self._tick.get(symbol)
