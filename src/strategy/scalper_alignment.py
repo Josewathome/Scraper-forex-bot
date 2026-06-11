@@ -26,6 +26,7 @@ No zone dependency. No HTF structure wait. Fires on every M1 close.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -207,22 +208,52 @@ class ScalperAlignmentEngine:
         current_close = closes[-1]
         slope         = current_ema - prev_ema
 
+        # ATR-normalize the slope so near-zero slopes on slow instruments
+        # don't masquerade as strong trends (e.g. USDCHF slope +0.000047).
+        # Use last 14 bars for ATR; fall back to last close range if too few bars.
+        atr = self._candle_atr(candles[-14:] if len(candles) >= 14 else candles)
+        if atr > 0:
+            # Slope per bar normalized against ATR.
+            # |norm_slope| < 0.05 = flat; > 0.20 = strong trend.
+            norm_slope = slope / atr
+        else:
+            norm_slope = 0.0
+
         # Direction from EMA position
         if current_close > current_ema:
             direction = Direction.BULLISH
-            score = 0.5
+            # Continuous score: 0.50 (flat/negligible slope) → 1.0 (strong slope).
+            # tanh(norm_slope * 10) saturates at ±1 for |norm_slope| ≥ 0.3.
             if slope > 0:
-                score = 1.0   # EMA rising AND price above = strong bull
+                score = 0.50 + 0.50 * math.tanh(norm_slope * 10.0)
+                score = max(0.50, min(1.0, score))
+            else:
+                # EMA above but slope falling — trend may be reversing
+                score = max(0.20, 0.50 + 0.50 * math.tanh(norm_slope * 10.0))
         elif current_close < current_ema:
             direction = Direction.BEARISH
-            score = 0.5
             if slope < 0:
-                score = 1.0   # EMA falling AND price below = strong bear
+                score = 0.50 + 0.50 * math.tanh(abs(norm_slope) * 10.0)
+                score = max(0.50, min(1.0, score))
+            else:
+                score = max(0.20, 0.50 + 0.50 * math.tanh(norm_slope * 10.0))
         else:
             direction = None
             score = 0.0
 
         return score, direction, current_ema, slope
+
+    @staticmethod
+    def _candle_atr(candles: List) -> float:
+        """Average True Range over a list of candles."""
+        if len(candles) < 2:
+            return 0.0
+        trs = []
+        for i in range(1, len(candles)):
+            pc = candles[i - 1].close
+            c  = candles[i]
+            trs.append(max(c.high - c.low, abs(c.high - pc), abs(c.low - pc)))
+        return sum(trs) / len(trs) if trs else 0.0
 
     @staticmethod
     def _ema(values: List[float], period: int) -> List[float]:
