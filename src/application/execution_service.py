@@ -347,6 +347,7 @@ class ExecutionService:
             elif cont >= eff_exit:
                 # Thesis degraded — close losing trades outright; partial exit only when in profit
                 if not in_profit and act:
+                    duration_min = (now - state.created_at).total_seconds() / 60
                     live_pips  = (pip_calc.price_to_pips(price - state.entry)
                                   if trade_dir == Direction.BULLISH
                                   else pip_calc.price_to_pips(state.entry - price))
@@ -426,6 +427,7 @@ class ExecutionService:
             struct_reversed = (struct_score * 0.40) == 0.0 and cont < DEFENSIVE_THRESHOLD
 
             if act and struct_reversed and state.defensive_mode and not in_profit:
+                duration_min = (now - state.created_at).total_seconds() / 60
                 live_pips  = (pip_calc.price_to_pips(price - state.entry)
                               if trade_dir == Direction.BULLISH
                               else pip_calc.price_to_pips(state.entry - price))

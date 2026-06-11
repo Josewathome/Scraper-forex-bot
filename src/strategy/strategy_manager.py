@@ -333,7 +333,7 @@ class StrategyManager:
             (direction == Direction.BEARISH and candle_result.score > 0)
         )
         if candle_conflicts:
-            if entry_ctx.early_candle and abs(candle_result.score) < entry_ctx.effective_candle_threshold * 2:
+            if entry_ctx.early_candle and abs(candle_result.score) < entry_ctx.effective_candle_threshold * 1:
                 logger.info(
                     "GATE6 PASS [%s] early-candle DOJI forgiven — structure=%s score=%.3f (body not yet formed)",
                     symbol, direction.value, candle_result.score,

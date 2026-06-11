@@ -174,11 +174,9 @@ class EntryGate:
         # ── Gate 2: Per-symbol session window ─────────────────────
         if not self._in_session(sym, now):
             start, end = _symbol_session(sym)
-            offset = getattr(config, "BROKER_UTC_OFFSET_HOURS", 0)
-            utc_h  = (now.hour - offset) % 24
             logger.info(
                 "ENTRY_GATE_BLOCK [%s] %s | %02d:%02d UTC (window %02d:00–%02d:00 UTC)",
-                sym, GateBlockReason.SESSION, utc_h, now.minute, start, end,
+                sym, GateBlockReason.SESSION, now.hour, now.minute, start, end,
             )
             return None
 
@@ -376,11 +374,8 @@ class EntryGate:
     @staticmethod
     def _in_session(symbol: str, now: datetime) -> bool:
         start, end = _symbol_session(symbol)
-        # Broker sends naive datetimes in broker-local time (UTC+BROKER_UTC_OFFSET_HOURS).
-        # astimezone(UTC) is unreliable here because a naive datetime gets interpreted
-        # as local system time, not broker time. Subtract the known offset directly.
-        offset = getattr(config, "BROKER_UTC_OFFSET_HOURS", 0)
-        h = (now.hour - offset) % 24
+        # now is true UTC (NTP-calibrated via BrokerClock → TrueTimeClock). Use hour directly.
+        h = now.hour
         if start <= end:
             return start <= h < end
         else:
