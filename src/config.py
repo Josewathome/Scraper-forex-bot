@@ -279,8 +279,8 @@ SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "
 SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "0"))
 
 SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))  # relaxed from 0.55 — 0.50 still requires M1+M5 agreement; gives more signals
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))  # relaxed from 0.55
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.25"))  # relaxed from 0.30
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.20"))  # relaxed from 0.55 — tick formula scores 0.06-0.29 under normal conditions; alignment gate already filters quality
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))  # relaxed from 0.30
 
 SCALPER_M5_EMA_PERIOD: int = int(os.environ.get("SCALPER_M5_EMA_PERIOD", "10"))
 
