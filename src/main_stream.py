@@ -599,7 +599,11 @@ def _run_strategy_evaluation(
 
     eval_now = now or datetime.now(tz=timezone.utc)
 
-    today = eval_now.date().isoformat()
+    # Always use UTC date — eval_now may be broker-local time (UTC+3)
+    try:
+        today = eval_now.astimezone(timezone.utc).date().isoformat()
+    except (AttributeError, TypeError):
+        today = eval_now.date().isoformat()
     if _last_gate_day.get(symbol) != today:
         _last_gate_day[symbol] = today
         try:

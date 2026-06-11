@@ -117,9 +117,19 @@ class EntryGate:
             execution_service=execution,
         )
 
+        # UTC date of last on_new_day call — prevents double-fire within same day
+        self._last_new_day_utc: Optional[str] = None
+
     # ── Public API ─────────────────────────────────────────────────
 
     def on_new_day(self, balance: float) -> None:
+        # Guard: only execute once per UTC calendar day regardless of how many
+        # times main_stream calls this (one call per symbol per event loop tick).
+        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+        if self._last_new_day_utc == today_utc:
+            return
+        self._last_new_day_utc = today_utc
+
         self._daily_counts.clear()
         # Use equity (balance + unrealized P&L) as the daily baseline so that
         # open losing positions are counted in the drawdown check, not just
@@ -164,9 +174,13 @@ class EntryGate:
         # ── Gate 2: Per-symbol session window ─────────────────────
         if not self._in_session(sym, now):
             start, end = _symbol_session(sym)
+            try:
+                utc_now = now.astimezone(timezone.utc)
+            except (AttributeError, TypeError):
+                utc_now = now
             logger.info(
                 "ENTRY_GATE_BLOCK [%s] %s | %s UTC (window %02d:00–%02d:00 UTC)",
-                sym, GateBlockReason.SESSION, now.strftime("%H:%M"), start, end,
+                sym, GateBlockReason.SESSION, utc_now.strftime("%H:%M"), start, end,
             )
             return None
 
@@ -364,7 +378,12 @@ class EntryGate:
     @staticmethod
     def _in_session(symbol: str, now: datetime) -> bool:
         start, end = _symbol_session(symbol)
-        h = now.hour
+        # Session windows are always UTC. Convert broker-local time to UTC before
+        # comparing, so a UTC+3 broker clock doesn't shift the window by 3 hours.
+        try:
+            h = now.astimezone(timezone.utc).hour
+        except (AttributeError, TypeError):
+            h = now.hour
         if start <= end:
             return start <= h < end
         else:
