@@ -264,10 +264,18 @@ class StrategyManager:
             elapsed_m1_secs,
         )
 
-        if abs(candle_result.score) < self.MIN_CANDLE_SCORE_ABS:
+        # When tick momentum is strong, a DOJI forming candle is less penalising:
+        # the directional tick pressure confirms the move; body formation lags.
+        candle_threshold = self.MIN_CANDLE_SCORE_ABS
+        tick_boost_threshold = getattr(config, "SCALPER_TICK_BOOST_THRESHOLD", 0.35)
+        if tick_result.score >= tick_boost_threshold:
+            candle_threshold = candle_threshold * 0.5
+
+        if abs(candle_result.score) < candle_threshold:
             logger.info(
-                "GATE6 BLOCK [%s] candle_score=%.3f < %.2f — candle too weak",
-                symbol, abs(candle_result.score), self.MIN_CANDLE_SCORE_ABS,
+                "GATE6 BLOCK [%s] candle_score=%.3f < %.2f — candle too weak%s",
+                symbol, abs(candle_result.score), candle_threshold,
+                " (tick-boost applied)" if tick_result.score >= tick_boost_threshold else "",
             )
             return None
 
