@@ -383,11 +383,23 @@ class EntryGate:
             req_margin_proxy = lots * 200.0
             safety_floor = getattr(config, "MARGIN_SAFETY_FACTOR", 1.5)
             if req_margin_proxy * safety_floor > free_margin:
+                # Risk-based lots don't fit — check if minimum 0.01 lots is affordable.
+                # If yes, allow: _build_trade will cap the lot size to fit the margin.
+                # Only block if even 0.01 lots × safety exceeds free margin.
+                min_req = 0.01 * 200.0 * safety_floor
+                if min_req > free_margin:
+                    logger.info(
+                        "MARGIN_GATE [%s] free=%.2f req_proxy=%.2f × %.1f = %.2f — insufficient "
+                        "(min 0.01 lots also blocked)",
+                        symbol, free_margin, req_margin_proxy, safety_floor,
+                        req_margin_proxy * safety_floor,
+                    )
+                    return False
                 logger.info(
-                    "MARGIN_GATE [%s] free=%.2f req_proxy=%.2f × %.1f = %.2f — insufficient",
-                    symbol, free_margin, req_margin_proxy, safety_floor, req_margin_proxy * safety_floor,
+                    "MARGIN_GATE [%s] free=%.2f risk_lots=%.2f too large — "
+                    "will cap to margin-affordable size",
+                    symbol, free_margin, lots,
                 )
-                return False
 
             # Check margin level via account info if available
             try:
