@@ -135,6 +135,18 @@ they are implemented and unit-tested in the live execution path.
   prominent startup warning that coverage is MT5-best-effort; set
   `NEWS_REQUIRE_EXTERNAL_FEED=true` to fail closed (block all trading) until a
   real external feed is configured.
+- **Gold (XAUUSD) runs a dedicated, volatility-adaptive profile.** A gold "pip"
+  is $0.01, so FX-calibrated fixed pip stops are economically tiny and get
+  destroyed by noise + cost (a 10-pip stop = $0.10, smaller than one gold tick,
+  while round-trip cost ≈ $0.20–0.40 — guaranteed negative). Gold therefore
+  sizes its stop from its **own M5 ATR** (`SCALPER_ATR_PRIMARY_SYMBOLS`):
+  `SL = clamp(structure, 0.7×ATR, 1.5×ATR)` then clamped to absolute
+  `150–500` pips ($1.50–$5.00). The TP1/TP2 R-multiples are unchanged so targets
+  scale to ~$2–$10 automatically. Gold also has its own session
+  (`12:00–21:00 UTC`, London-PM + NY/COMEX), spread cap (`80` pips = $0.80), and
+  hold limit (`20` min). **Only XAUUSD is affected — every FX symbol keeps its
+  unchanged swing-first, fixed-pip behaviour.** Gold is still gated by the same
+  EV/cost/exploration logic and must prove positive EV on its own data.
 
 ---
 

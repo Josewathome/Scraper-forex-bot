@@ -208,7 +208,7 @@ MAX_TRADE_DURATION_MINUTES = 600
 MIN_SL_PIPS: dict[str, float] = {
     "EURUSD": 3.0, "GBPUSD": 3.0, "AUDUSD": 3.0,
     "USDJPY": 5.0, "EURJPY": 5.0, "GBPJPY": 5.0,
-    "XAUUSD": 30.0,
+    "XAUUSD": 150.0,   # GOLD: kept consistent with SCALPER_MIN_SL_PIPS ($1.50)
     "XAGUSD": 20.0,
     "USDCHF": 3.0,
 }
@@ -262,7 +262,7 @@ SCALPER_SESSION_END_UTC:   int = int(os.environ.get("SCALPER_SESSION_END_UTC",  
 # (not yet wired — edit here directly if you need to adjust)
 SCALPER_SYMBOL_SESSIONS: dict = {
     "GBPUSD": (5,  19),   # Pre-London open → NY afternoon (extended from 17 — NY active until ~19 UTC)
-    "XAUUSD": (5,  22),   # Pre-London → EU afterhours
+    "XAUUSD": (12, 21),   # GOLD: London-PM + NY/COMEX core only (cleanest gold flow)
     "USDJPY": (0,  19),   # Full Asian + London + NY afternoon (extended from 17)
     "AUDUSD": (22, 13),   # Sydney open (wraps midnight) → London midday
     "USDCHF": (5,  19),   # European pair — extended to match GBPUSD NY afternoon
@@ -286,7 +286,7 @@ SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCI
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
-    "XAUUSD": 10.0,
+    "XAUUSD": 150.0,   # GOLD: $1.50 floor — survives normal M1 noise (a "pip" is $0.01)
     "USDJPY": 3.0,
     "AUDUSD": 3.0,
     "USDCHF": 3.0,
@@ -296,13 +296,44 @@ SCALPER_MIN_SL_PIPS_DEFAULT: float = 3.0
 
 SCALPER_MAX_SL_PIPS: dict = {
     "GBPUSD": 12.0,
-    "XAUUSD": 40.0,
+    "XAUUSD": 500.0,   # GOLD: $5.00 ceiling — reject setups needing a wider stop
     "USDJPY": 12.0,
     "AUDUSD": 12.0,
     "USDCHF": 12.0,
     "EURUSD": 12.0,
 }
 SCALPER_MAX_SL_PIPS_DEFAULT: float = 12.0
+
+# ══════════════════════════════════════════════════════════════════
+#  GOLD (XAUUSD) — DEDICATED ADAPTIVE PROFILE
+#  Gold's "pip" is $0.01, so FX-calibrated fixed pip stops/targets are
+#  economically tiny and get destroyed by noise + cost. Gold therefore sizes
+#  its stop from its OWN M5 ATR (volatility-adaptive), clamped to absolute
+#  bounds, and carries its own spread cap, session, and hold limit. These
+#  settings affect ONLY symbols listed in SCALPER_ATR_PRIMARY_SYMBOLS — every
+#  other symbol keeps the unchanged swing-first / fixed-pip behaviour.
+# ══════════════════════════════════════════════════════════════════
+# Symbols that size their stop from ATR as the PRIMARY method (not just fallback).
+SCALPER_ATR_PRIMARY_SYMBOLS: set = {"XAUUSD"}
+# ATR multipliers for the adaptive stop (applied to M5 ATR):
+#   floor  = ATR × MIN_MULT   (stop never tighter than this — survive noise)
+#   ceiling= ATR × MAX_MULT   (stop never wider than this — cap risk)
+#   default= ATR × DEFAULT_MULT (used when no structural swing is available)
+# The result is ALSO clamped to the absolute SCALPER_MIN/MAX_SL_PIPS guards above.
+SCALPER_ATR_SL_MIN_MULT:     float = float(os.environ.get("SCALPER_ATR_SL_MIN_MULT",     "0.7"))
+SCALPER_ATR_SL_MAX_MULT:     float = float(os.environ.get("SCALPER_ATR_SL_MAX_MULT",     "1.5"))
+SCALPER_ATR_SL_DEFAULT_MULT: float = float(os.environ.get("SCALPER_ATR_SL_DEFAULT_MULT", "1.0"))
+
+# Per-symbol absolute spread cap (pips). Falls back to the global MAX_SPREAD_PIPS.
+# Gold spreads are naturally wide in pip terms ($0.01 pips), so it needs its own.
+SCALPER_MAX_SPREAD_PIPS: dict = {
+    "XAUUSD": 80.0,   # $0.80 — gold raw spread is wide in 0.01-pip terms
+}
+
+# Per-symbol maximum hold minutes. Falls back to SCALPER_MAX_HOLD_MINUTES.
+SCALPER_MAX_HOLD_MINUTES_PER_SYMBOL: dict = {
+    "XAUUSD": 20,     # gold moves fast — shorter scalp window
+}
 
 SCALPER_TP1_RR: float = float(os.environ.get("SCALPER_TP1_RR", "1.5"))
 SCALPER_TP2_RR: float = float(os.environ.get("SCALPER_TP2_RR", "2.0"))
