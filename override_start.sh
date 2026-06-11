@@ -1094,6 +1094,7 @@ trap _graceful_shutdown SIGTERM SIGINT
 # (a foreground command would swallow the signal until it returns).
 echo "Starting ZoneBot (stream mode) in Wine Python..."
 cd /bot && DISPLAY=:1 WINEPREFIX=/config/.wine PYTHONUTF8=1 PYTHONIOENCODING=utf-8 \
+    BOT_ANALYTICS_DIR='Z:/bot/analytics' \
     $wine_executable python -m src.main_stream &
 _bot_pid=$!
 # `wait` returns when the bot exits OR when a trapped signal fires.

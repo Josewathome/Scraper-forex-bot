@@ -222,11 +222,11 @@ SCALPER_SESSION_END_UTC:   int = int(os.environ.get("SCALPER_SESSION_END_UTC",  
 # Override any symbol via env var: SCALPER_SESSION_GBPUSD_START=8
 # (not yet wired — edit here directly if you need to adjust)
 SCALPER_SYMBOL_SESSIONS: dict = {
-    "GBPUSD": (5,  17),   # Pre-London open → NY close
+    "GBPUSD": (5,  19),   # Pre-London open → NY afternoon (extended from 17 — NY active until ~19 UTC)
     "XAUUSD": (5,  22),   # Pre-London → EU afterhours
-    "USDJPY": (0,  17),   # Full Asian + London + NY
+    "USDJPY": (0,  19),   # Full Asian + London + NY afternoon (extended from 17)
     "AUDUSD": (22, 13),   # Sydney open (wraps midnight) → London midday
-    "USDCHF": (5,  17),   # European pair, matches GBPUSD
+    "USDCHF": (5,  19),   # European pair — extended to match GBPUSD NY afternoon
 }
 
 # ── Tick velocity gate ────────────────────────────────────────────────────
@@ -321,7 +321,7 @@ ANTI_DUPE_SECONDS:       int   = int(os.environ.get("ANTI_DUPE_SECONDS",        
 # MT5 issues a margin call at 100%; we block at MIN_MARGIN_LEVEL.
 MIN_MARGIN_LEVEL_PCT:    float = float(os.environ.get("MIN_MARGIN_LEVEL_PCT",    "200.0"))
 # How many times the required margin must be available as free margin.
-MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.5"))
+MARGIN_SAFETY_FACTOR:    float = float(os.environ.get("MARGIN_SAFETY_FACTOR",   "1.2"))
 
 # ── Trade Guardian (continuous re-evaluation) ─────────────────────
 # cont_score = M1_structure*0.40 + signal_alignment*0.35 + pnl_ratio*0.25
