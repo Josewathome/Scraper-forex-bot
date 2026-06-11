@@ -153,6 +153,7 @@ class ExecutionService:
         self._loss_streak:  Dict[str, int]                      = {}
         self._streak_pause: Dict[str, Optional[datetime]]       = {}
         self._eval_ids:     Dict[int, str]                      = {}
+        self._mfe_last_logged: Dict[int, datetime]              = {}
 
     # ── Helpers ───────────────────────────────────────────────────────
 
@@ -432,7 +433,16 @@ class ExecutionService:
                 logger.debug("TickAnalytics record_trade_executed failed: %s", _exc)
 
         try:
-            self._journal.record_open(trade, ticket)
+            self._journal.record_open(
+                ticket=ticket,
+                symbol=state.symbol,
+                direction=state.direction.value if hasattr(state.direction, "value") else state.direction,
+                entry=state.entry,
+                sl=state.current_sl,
+                tp=state.take_profit,
+                lot_size=state.lot_size,
+                grade=state.grade,
+            )
         except Exception as exc:
             logger.warning("Journal record_open failed ticket=%s: %s", ticket, exc)
 
@@ -500,14 +510,17 @@ class ExecutionService:
                             else pip_calc.price_to_pips(state.entry - price))
             duration_min = (now - state.created_at).total_seconds() / 60
 
-            logger.info(
-                "MFE  [%s] ticket=%s %s | price=%.5f | live=%+.1fpips mfe=%.1fpips | "
-                "sl=%.5f tp1=%.5f tp2=%.5f | held=%.1fmin | cont=%.2f",
-                symbol, ticket, state.direction.value.upper(),
-                price, live_pips, mfe_pips,
-                state.current_sl, state.tp1_price, state.tp2_price,
-                duration_min, state.last_reeval_score,
-            )
+            _last_mfe_log = self._mfe_last_logged.get(ticket)
+            if _last_mfe_log is None or (now - _last_mfe_log).total_seconds() >= 60:
+                logger.info(
+                    "MFE  [%s] ticket=%s %s | price=%.5f | live=%+.1fpips mfe=%.1fpips | "
+                    "sl=%.5f tp1=%.5f tp2=%.5f | held=%.1fmin | cont=%.2f",
+                    symbol, ticket, state.direction.value.upper(),
+                    price, live_pips, mfe_pips,
+                    state.current_sl, state.tp1_price, state.tp2_price,
+                    duration_min, state.last_reeval_score,
+                )
+                self._mfe_last_logged[ticket] = now
 
             # ── TP1 partial close ──────────────────────────────────────
             if not state.tp1_hit:
