@@ -243,7 +243,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.0"))
+SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "0.5"))  # relaxed from 1.0 — 0.5 still filters dead markets; 1.0 was blocking valid London pre-open
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
@@ -278,9 +278,9 @@ SCALPER_MAX_DAILY_TRADES: int = int(os.environ.get("SCALPER_MAX_DAILY_TRADES", "
 # Set SCALPER_MAX_OPEN_TRADES = 0 to disable.
 SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "0"))
 
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.55"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))  # relaxed from 0.55 — 0.50 still requires M1+M5 agreement; gives more signals
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))  # relaxed from 0.55
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.25"))  # relaxed from 0.30
 
 SCALPER_M5_EMA_PERIOD: int = int(os.environ.get("SCALPER_M5_EMA_PERIOD", "10"))
 
