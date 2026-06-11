@@ -77,11 +77,12 @@ logger = logging.getLogger(__name__)
 # Z: drive mapping (Z:\bot\analytics) without needing to mkdir itself.
 _ANALYTICS_DIR = os.environ.get("BOT_ANALYTICS_DIR", "/bot/analytics")
 
-_RAW_FILE     = os.path.join(_ANALYTICS_DIR, "tick_velocity_raw.jsonl")
-_HOURLY_FILE  = os.path.join(_ANALYTICS_DIR, "tick_velocity_hourly.jsonl")
-_DAILY_FILE   = os.path.join(_ANALYTICS_DIR, "tick_velocity_daily.jsonl")
-_WEEKLY_FILE  = os.path.join(_ANALYTICS_DIR, "tick_velocity_weekly.jsonl")
-_REPORT_FILE  = os.path.join(_ANALYTICS_DIR, "tick_velocity_report.txt")
+_D = _ANALYTICS_DIR.rstrip("/\\")
+_RAW_FILE     = _D + "/tick_velocity_raw.jsonl"
+_HOURLY_FILE  = _D + "/tick_velocity_hourly.jsonl"
+_DAILY_FILE   = _D + "/tick_velocity_daily.jsonl"
+_WEEKLY_FILE  = _D + "/tick_velocity_weekly.jsonl"
+_REPORT_FILE  = _D + "/tick_velocity_report.txt"
 
 
 # ── Data structures ────────────────────────────────────────────────────────────
