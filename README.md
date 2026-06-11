@@ -113,6 +113,28 @@ they are implemented and unit-tested in the live execution path.
   (realised net P&L, including swap/commission). Win/loss is classified by the
   **sign of realised money** — never reconstructed from maximum-favourable
   excursion. If the bot loses money, the analytics show losses.
+- **Fill-anchored levels.** After the order fills, the tracked entry, SL distance,
+  TP1/TP2 and MFE are anchored to the **actual fill price** (not the stale
+  signal-time price), so risk and R:R reflect what was really executed.
+- **EV reflects the real exit plan.** The EV gate's expected win is the
+  **blended** value of the TP1 partial + TP2 + runner (weighted by close
+  fractions), not a naive "100% at TP1". The runner is modelled conservatively
+  at `RUNNER_EXIT_RR`.
+- **Controlled exploration bootstrap.** Because a fresh system has no broker-truth
+  samples to compute EV from, up to `EXPLORATION_TRADES_PER_DAY` minimum-risk
+  probe trades per symbol may bypass **only** the EV edge requirement (every
+  other gate still applies) until `EV_MIN_SAMPLES` real outcomes exist. After
+  that, the rolling broker-truth EV governs and exploration stops. Exploration
+  never bypasses a fail-closed ("unknown cost") condition.
+- **Reversal re-entry cooldown.** After a reversal/structural-reversal exit, new
+  entries on that symbol are blocked for `REVERSAL_REENTRY_COOLDOWN_SEC` to stop
+  whipsaw churn.
+- **Ranging suppression.** In a detected ranging regime the alignment threshold
+  is raised by `RANGING_ALIGN_PENALTY`, so M1 chop must clear a higher bar.
+- **News coverage is explicit.** With no external `NEWS_API_KEY`, the bot logs a
+  prominent startup warning that coverage is MT5-best-effort; set
+  `NEWS_REQUIRE_EXTERNAL_FEED=true` to fail closed (block all trading) until a
+  real external feed is configured.
 
 ---
 

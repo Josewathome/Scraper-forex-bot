@@ -369,6 +369,30 @@ ASSUMED_WIN_RATE_HAIRCUT: float = float(os.environ.get("ASSUMED_WIN_RATE_HAIRCUT
 EV_MIN_PIPS:             float = float(os.environ.get("EV_MIN_PIPS",             "0.10"))
 EV_ROLLING_WINDOW:       int   = int(os.environ.get("EV_ROLLING_WINDOW",         "50"))
 EV_MIN_SAMPLES:          int   = int(os.environ.get("EV_MIN_SAMPLES",            "30"))
+# Expected exit R used to model the tiered TP plan in the EV gate's avg_win.
+# Conservative default for the runner = TP1 RR (assume the runner gives back to TP1).
+RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",          str(SCALPER_TP1_RR)))
+
+# ── Exploration bootstrap ─────────────────────────────────────────
+# The EV gate refuses negative-EV trades, but a brand-new system has no
+# broker-truth samples to compute EV from (cold-start). To break that deadlock
+# WITHOUT weakening any other protection, allow a small, capped number of
+# minimum-risk "exploration" trades per symbol per day that bypass ONLY the EV
+# edge requirement (every other gate — news, spread/cost, margin, R:R, session,
+# velocity — still applies). These gather real outcomes so the rolling EV can
+# take over. Exploration trades are forced to the lowest risk grade.
+EXPLORATION_ENABLED:        bool = os.environ.get("EXPLORATION_ENABLED", "true").lower() == "true"
+EXPLORATION_TRADES_PER_DAY: int  = int(os.environ.get("EXPLORATION_TRADES_PER_DAY", "8"))  # per symbol
+
+# ── Reversal re-entry cooldown ────────────────────────────────────
+# After a reversal/structural-reversal exit, block ALL new entries on that
+# symbol for this many seconds to avoid whipsaw churn in chop.
+REVERSAL_REENTRY_COOLDOWN_SEC: int = int(os.environ.get("REVERSAL_REENTRY_COOLDOWN_SEC", "120"))
+
+# ── Ranging-regime suppression ────────────────────────────────────
+# In a detected ranging regime, require a higher alignment score (add this to
+# the effective threshold). Ranging M1 chop is the main source of false signals.
+RANGING_ALIGN_PENALTY: float = float(os.environ.get("RANGING_ALIGN_PENALTY", "0.10"))
 
 # ── Spread / cost gate ────────────────────────────────────────────
 # Round-trip cost (spread + commission) must be no more than this fraction of
@@ -381,6 +405,12 @@ MAX_SPREAD_PIPS: float = float(os.environ.get("MAX_SPREAD_PIPS", "40.0"))
 # If the news cache has not refreshed successfully within this many minutes,
 # the news gate blocks ALL entries (we cannot prove we are clear of news).
 NEWS_MAX_STALENESS_MIN: float = float(os.environ.get("NEWS_MAX_STALENESS_MIN", "30"))
+# If True, REQUIRE a real external news feed (NEWS_API_KEY). When no external
+# feed is configured the only source is MT5's built-in calendar, whose coverage
+# is best-effort; setting this True makes the news gate block all entries until
+# an external feed is present (explicit fail-closed). Default False (the startup
+# logs a prominent warning so the operator knows coverage is best-effort).
+NEWS_REQUIRE_EXTERNAL_FEED: bool = os.environ.get("NEWS_REQUIRE_EXTERNAL_FEED", "false").lower() == "true"
 
 # ── Duplicate-trade guard ─────────────────────────────────────────
 # Prevents re-entering the same symbol in the same direction within

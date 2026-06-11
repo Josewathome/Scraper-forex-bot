@@ -110,6 +110,9 @@ class EntryGate:
         # Analytics: daily trade count (informational only — not a gate)
         self._daily_counts: Dict[str, int] = {}
 
+        # Exploration bootstrap: per-symbol count of EV-bypassed probe trades today.
+        self._exploration_counts: Dict[str, int] = {}
+
         # Portfolio-level capital allocation authority
         from src.application.margin_manager import MarginManager
         self._margin = MarginManager(
@@ -131,6 +134,7 @@ class EntryGate:
         self._last_new_day_utc = today_utc
 
         self._daily_counts.clear()
+        self._exploration_counts.clear()
         # Use equity (balance + unrealized P&L) as the daily baseline so that
         # open losing positions are counted in the drawdown check, not just
         # realized balance which lags until trades close.
@@ -183,6 +187,15 @@ class EntryGate:
                 return None
         except Exception as exc:
             logger.error("Loss-streak check failed for %s: %s — rejecting (fail closed)", sym, exc)
+            return None
+
+        # ── Gate 0b: Reversal re-entry cooldown ────────────────────
+        try:
+            if self._exec.is_reversal_cooldown(sym, now):
+                logger.info("ENTRY_GATE_BLOCK [%s] reversal_reentry_cooldown", sym)
+                return None
+        except Exception as exc:
+            logger.error("Reversal-cooldown check failed for %s: %s — rejecting (fail closed)", sym, exc)
             return None
 
         # ── Gate 1: News proximity ─────────────────────────────────
@@ -281,9 +294,26 @@ class EntryGate:
             return None
 
         # ── Gate 6b: Expected value (real cost + rolling win rate) ──
-        if not self._ev_positive(sym, sl_dist_pips, tp1_dist_pips, broker_cost):
-            logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.EV_NEGATIVE)
+        # Status: "pass" | "negative" | "unknown".
+        #   unknown  → data problem → reject (fail closed, never explored)
+        #   negative → reject UNLESS a bootstrap exploration slot is available
+        is_exploration = False
+        ev_status = self._ev_status(sym, sl_dist_pips, tp1_dist_pips, broker_cost)
+        if ev_status == "unknown":
+            logger.info("ENTRY_GATE_BLOCK [%s] %s (cost/EV undeterminable)", sym, GateBlockReason.EV_NEGATIVE)
             return None
+        if ev_status == "negative":
+            if self._exploration_allowed(sym):
+                is_exploration = True
+                logger.info(
+                    "EXPLORATION [%s] EV-negative but bootstrap probe slot available "
+                    "(used %d/%d today) — bypassing EV gate ONLY, at minimum risk",
+                    sym, self._exploration_counts.get(sym, 0),
+                    getattr(config, "EXPLORATION_TRADES_PER_DAY", 8),
+                )
+            else:
+                logger.info("ENTRY_GATE_BLOCK [%s] %s", sym, GateBlockReason.EV_NEGATIVE)
+                return None
 
         # ── Gate 7: Anti-duplicate ─────────────────────────────────
         anti_dupe_secs = getattr(config, "ANTI_DUPE_SECONDS", 60)
@@ -363,6 +393,12 @@ class EntryGate:
         # always intended for — they are now wired here via MarginManager.
         risk_pct, grade = self._margin.quality_risk_pct(confidence, tq_score)
 
+        # Exploration probes are forced to the MINIMUM risk grade — they exist to
+        # gather broker-truth samples cheaply, not to express conviction.
+        if is_exploration:
+            risk_pct = min(risk_pct, getattr(config, "RISK_MIN_CONVICTION", 0.5))
+            grade    = "C"
+
         try:
             from src.application.execution_service import EntryCandidate
         except ImportError:
@@ -385,18 +421,51 @@ class EntryGate:
             is_phase2=   False,
         )
 
+        candidate._exploration = is_exploration
+
         logger.info(
             "ENTRY_GATE_PASS [%s] %s | conf=%.2f tq=%.2f | grade=%s risk=%.1f%% | "
-            "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.1f | daily_count=%d",
+            "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.1f | %s | daily_count=%d",
             sym, signal.direction.value.upper(), confidence, tq_score,
             grade, risk_pct,
             current_price, sl_price, tp1_price, tp2_price,
             sl_dist_pips, tp1_rr,
+            "EXPLORATION" if is_exploration else "EV_OK",
             self.daily_trade_count(),
         )
 
         candidate._eval_id = eval_id
         return candidate
+
+    # ── Exploration bootstrap ──────────────────────────────────────
+
+    def _exploration_allowed(self, symbol: str) -> bool:
+        """
+        True when the EV gate may be bypassed for a capped, minimum-risk probe to
+        gather broker-truth samples. Only while the symbol has fewer than
+        EV_MIN_SAMPLES closed trades AND the daily exploration cap is not reached.
+        """
+        if not getattr(config, "EXPLORATION_ENABLED", True):
+            return False
+        cap = getattr(config, "EXPLORATION_TRADES_PER_DAY", 8)
+        if self._exploration_counts.get(symbol, 0) >= cap:
+            return False
+        try:
+            journal = getattr(self._exec, "_journal", None)
+            samples = 0
+            if journal is not None and hasattr(journal, "rolling_performance"):
+                samples = journal.rolling_performance(
+                    symbol, n=getattr(config, "EV_ROLLING_WINDOW", 50)
+                ).get("samples", 0)
+            return samples < getattr(config, "EV_MIN_SAMPLES", 30)
+        except Exception as exc:
+            # If we can't determine sample count, do NOT explore (fail closed).
+            logger.error("Exploration check failed for %s: %s — not exploring", symbol, exc)
+            return False
+
+    def record_exploration(self, symbol: str) -> None:
+        """Increment the per-symbol daily exploration counter after a probe fills."""
+        self._exploration_counts[symbol] = self._exploration_counts.get(symbol, 0) + 1
 
     # ── Private helpers ────────────────────────────────────────────
 
@@ -493,43 +562,65 @@ class EntryGate:
             logger.error("Cost gate failed for %s: %s — rejecting (fail closed)", symbol, exc)
             return False
 
-    def _ev_positive(
+    @staticmethod
+    def _blended_win_pips(sl_dist_pips: float) -> float:
+        """
+        Expected win in pips that reflects the ACTUAL tiered-exit plan, not a
+        naive "100% exits at TP1". Weights TP1/TP2/runner by their close
+        fractions; the runner is assumed to give back to RUNNER_EXIT_RR
+        (default = TP1 RR) for conservatism.
+
+            w1 = TIERED_TP1_CLOSE_PCT
+            w2 = TIERED_TP2_CLOSE_PCT × (1 − w1)        (25% of the remainder)
+            runner = (1 − w1) − w2
+            blended_R = w1·TP1_RR + w2·TP2_RR + runner·RUNNER_EXIT_RR
+        """
+        tp1_rr  = getattr(config, "TP1_RR_RATIO", 1.5)
+        tp2_rr  = getattr(config, "TP2_RR_RATIO", 2.0)
+        run_rr  = getattr(config, "RUNNER_EXIT_RR", tp1_rr)
+        w1      = getattr(config, "TIERED_TP1_CLOSE_PCT", 0.60)
+        rem     = max(0.0, 1.0 - w1)
+        w2      = getattr(config, "TIERED_TP2_CLOSE_PCT", 0.25) * rem
+        runner  = max(0.0, rem - w2)
+        blended_rr = w1 * tp1_rr + w2 * tp2_rr + runner * run_rr
+        return sl_dist_pips * blended_rr
+
+    def _ev_status(
         self,
         symbol:        str,
         sl_dist_pips:  float,
         tp1_dist_pips: float,
         broker_cost:   BrokerCost,
-    ) -> bool:
+    ) -> str:
         """
-        Reject trades whose expected value is non-positive after real costs.
+        Returns "pass", "negative", or "unknown".
 
             EV = win_rate × avg_win − (1 − win_rate) × avg_loss − round_trip_cost
 
-        Uses the broker-truth ROLLING win rate / avg win / avg loss (pips) from
-        the trade journal once EV_MIN_SAMPLES outcomes exist for the symbol.
-        Before that, falls back to a HAIRCUT ASSUMED_WIN_RATE and the geometric
-        win/loss (target vs stop). FAIL CLOSED on any error.
+        Uses broker-truth ROLLING win rate / avg win / avg loss (pips) once
+        EV_MIN_SAMPLES outcomes exist; before that a HAIRCUT ASSUMED_WIN_RATE and
+        the BLENDED tiered-exit win (not a naive TP1-only win). "unknown" when
+        cost cannot be computed or an error occurs (caller rejects, fail closed —
+        exploration never bypasses "unknown").
         """
         try:
             ev_min = getattr(config, "EV_MIN_PIPS", 0.10)
             cost   = broker_cost.round_trip_cost_pips()
             if cost == float("inf") or not (cost == cost):
                 logger.info("EV_GATE [%s] cost unknown — rejecting (fail closed)", symbol)
-                return False
+                return "unknown"
 
             win_rate = getattr(config, "ASSUMED_WIN_RATE", 0.50)
-            avg_win  = tp1_dist_pips
+            avg_win  = self._blended_win_pips(sl_dist_pips)
             avg_loss = sl_dist_pips
             source   = "bootstrap"
 
-            # Rolling broker-truth performance, if available.
             perf = None
             try:
                 journal = getattr(self._exec, "_journal", None)
                 if journal is not None and hasattr(journal, "rolling_performance"):
                     perf = journal.rolling_performance(
-                        symbol,
-                        n=getattr(config, "EV_ROLLING_WINDOW", 50),
+                        symbol, n=getattr(config, "EV_ROLLING_WINDOW", 50),
                     )
             except Exception as exc:
                 logger.debug("rolling_performance unavailable for %s: %s", symbol, exc)
@@ -542,7 +633,6 @@ class EntryGate:
                 avg_loss = perf["avg_loss_pips"]
                 source   = f"rolling(n={perf['samples']})"
             else:
-                # Not enough real data — be conservative: haircut the assumed win rate.
                 win_rate = max(0.0, win_rate - getattr(config, "ASSUMED_WIN_RATE_HAIRCUT", 0.05))
 
             ev = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss) - cost
@@ -551,15 +641,15 @@ class EntryGate:
                     "EV_GATE [%s] ev=%.2f pips (wr=%.2f win=%.2f loss=%.2f cost=%.2f src=%s) < min=%.2f",
                     symbol, ev, win_rate, avg_win, avg_loss, cost, source, ev_min,
                 )
-                return False
+                return "negative"
             logger.debug(
                 "EV_GATE [%s] PASS ev=%.2f (wr=%.2f win=%.2f loss=%.2f cost=%.2f src=%s)",
                 symbol, ev, win_rate, avg_win, avg_loss, cost, source,
             )
-            return True
+            return "pass"
         except Exception as exc:
             logger.error("EV gate error for %s: %s — rejecting (fail closed)", symbol, exc)
-            return False
+            return "unknown"
 
     @staticmethod
     def _compute_sl(

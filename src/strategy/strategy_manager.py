@@ -262,10 +262,16 @@ class StrategyManager:
             logger.debug("ENTRY_CTX [%s]   → %s", symbol, r)
 
         # ── Gate 1: Alignment score (context-adapted threshold) ────────
-        if alignment.score < entry_ctx.effective_align_threshold:
+        # Ranging-regime suppression: M1 chop is the main source of false
+        # signals, so REQUIRE a higher alignment score in a ranging regime.
+        align_threshold = entry_ctx.effective_align_threshold
+        if alignment.regime == Regime.RANGING:
+            align_threshold += getattr(config, "RANGING_ALIGN_PENALTY", 0.10)
+        if alignment.score < align_threshold:
             logger.info(
-                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f | dir=%s",
-                symbol, alignment.score, entry_ctx.effective_align_threshold,
+                "GATE1 BLOCK [%s] align_score=%.2f < threshold=%.2f%s | dir=%s",
+                symbol, alignment.score, align_threshold,
+                " (ranging+penalty)" if alignment.regime == Regime.RANGING else "",
                 alignment.details.get("m1_dir", "NONE"),
             )
             return None

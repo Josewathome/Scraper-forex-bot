@@ -251,12 +251,19 @@ def run_stream() -> None:
     trade_repo   = MT5TradeRepository(gw)
     cache        = JsonCacheStore()
     mt5_news     = MT5NewsClient()
-    if config.NEWS_API_KEY:
+    _has_external_news = bool(config.NEWS_API_KEY)
+    if _has_external_news:
         ff_news     = ForexNewsClient(api_key=config.NEWS_API_KEY, cache=cache)
         news_client = CompositeNewsClient([ff_news, mt5_news])
     else:
         news_client = mt5_news
-    news_manager    = NewsManager(news_client)
+        logger.warning(
+            "NEWS COVERAGE: no external NEWS_API_KEY configured — relying on MT5's "
+            "built-in calendar only (best-effort). High-impact events may be missed. "
+            "Set NEWS_API_KEY for full coverage, or NEWS_REQUIRE_EXTERNAL_FEED=true to "
+            "block trading until an external feed is present."
+        )
+    news_manager    = NewsManager(news_client, has_external_feed=_has_external_news)
     commission      = _commission_in_account_ccy(config.COMMISSION_PER_LOT)
     commission_map  = _build_commission_map()
     spread_calc  = SpreadCalculator(
@@ -666,6 +673,8 @@ def _run_strategy_evaluation(
         if trade:
             entry_gate.record_trade()
             entry_gate.record_fill(symbol, signal.direction)
+            if getattr(candidate, "_exploration", False):
+                entry_gate.record_exploration(symbol)
             logger.info(
                 "STRATEGY_TRADE [%s] %s | conf=%.2f | %.2f lots | "
                 "entry=%.5f SL=%.5f TP1=%.5f | daily_total=%d",

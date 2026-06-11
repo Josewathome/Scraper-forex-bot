@@ -159,6 +159,7 @@ class ExecutionService:
         self._trade_states: Dict[int, _OpenTradeState]          = {}
         self._loss_streak:  Dict[str, int]                      = {}
         self._streak_pause: Dict[str, Optional[datetime]]       = {}
+        self._reversal_cooldown: Dict[str, datetime]            = {}
         self._eval_ids:     Dict[int, str]                      = {}
         self._mfe_last_logged: Dict[int, datetime]              = {}
 
@@ -181,6 +182,25 @@ class ExecutionService:
             self._streak_pause[symbol] = None
             return False
         return True
+
+    def is_reversal_cooldown(self, symbol: str, now: Optional[datetime] = None) -> bool:
+        """
+        True while a symbol is in a post-reversal cooldown — blocks re-entry churn
+        after the bot has just flipped/closed a position against a reversal.
+        """
+        until = self._reversal_cooldown.get(symbol)
+        if until is None:
+            return False
+        now = now or datetime.now(tz=timezone.utc)
+        if now >= until:
+            self._reversal_cooldown[symbol] = None
+            return False
+        return True
+
+    def _arm_reversal_cooldown(self, symbol: str) -> None:
+        secs = getattr(config, "REVERSAL_REENTRY_COOLDOWN_SEC", 120)
+        if secs and secs > 0:
+            self._reversal_cooldown[symbol] = datetime.now(tz=timezone.utc) + timedelta(seconds=secs)
 
     def has_tp1_hit_for_symbol(self, symbol: str) -> bool:
         return any(s.tp1_hit for s in self._trade_states.values() if s.symbol == symbol)
@@ -427,6 +447,7 @@ class ExecutionService:
                 duration_min = (now - state.created_at).total_seconds() / 60
                 if self._tr.close_trade(ticket):
                     self._finalize_close(ticket, state, action="structural_reversal_exit")
+                    self._arm_reversal_cooldown(symbol)
                     logger.info(
                         "STRUCTURAL_REVERSAL_EXIT [%s] ticket=%s | M1 structure fully reversed "
                         "| cont=%.2f | held=%.1fmin",
@@ -440,6 +461,7 @@ class ExecutionService:
                     and act):
                 if self._tr.close_trade(ticket):
                     self._finalize_close(ticket, state, action="reversal_exit")
+                    self._arm_reversal_cooldown(symbol)
                     logger.info(
                         "REVERSAL_EXIT [%s] ticket=%s | opposing %s signal conf=%.2f ≥ %.2f",
                         symbol, ticket,
@@ -495,16 +517,30 @@ class ExecutionService:
         trade.mt5_ticket = ticket
         trade.status     = TradeStatus.OPEN
 
-        initial_risk = abs(signal.entry_price - signal.stop_loss)
+        # Anchor ALL tracked levels to the ACTUAL fill price and the actual
+        # broker SL/TP that place_trade set (it updates trade.* to the live fill
+        # and the stop-level-nudged SL/TP). Re-anchor the software TP1/TP2 by the
+        # fill slippage so the tiered targets stay at the intended distance from
+        # the real entry, not the (now stale) signal-time price.
+        fill_delta   = trade.entry_price - signal.entry_price
+        tp1_anchored = candidate.tp1_price + fill_delta
+        tp2_anchored = trade.take_profit            # broker TP2 backstop (already at fill-ref)
+        initial_risk = abs(trade.entry_price - trade.stop_loss)
+        if abs(fill_delta) > 0:
+            logger.info(
+                "FILL_ANCHOR [%s] signal=%.5f fill=%.5f Δ=%.5f | SL=%.5f TP1=%.5f TP2=%.5f",
+                symbol, signal.entry_price, trade.entry_price, fill_delta,
+                trade.stop_loss, tp1_anchored, tp2_anchored,
+            )
         confidence   = float(candidate.trade_score) / 100.0
         state = _OpenTradeState(
             symbol=symbol, direction=signal.direction,
-            entry=signal.entry_price, original_sl=signal.stop_loss,
-            current_sl=signal.stop_loss, take_profit=signal.take_profit,
-            tp1_price=candidate.tp1_price, tp2_price=candidate.tp2_price,
+            entry=trade.entry_price, original_sl=trade.stop_loss,
+            current_sl=trade.stop_loss, take_profit=trade.take_profit,
+            tp1_price=tp1_anchored, tp2_price=tp2_anchored,
             lot_size=trade.lot_size, initial_lot=trade.lot_size,
             pip_value=candidate.pip_value, initial_risk=initial_risk,
-            mfe_price=signal.entry_price,
+            mfe_price=trade.entry_price,
             digits=candidate.digits, grade=candidate.grade,
             created_at=datetime.now(tz=timezone.utc),
             entry_confidence=confidence,
@@ -1161,10 +1197,13 @@ class ExecutionService:
             logger.warning("BUILD_TRADE [%s] volume constraints unreadable: %s — using defaults", symbol, exc)
         vstep   = vstep if vstep and vstep > 0 else 0.01
         max_lot = min(getattr(config, "MAX_LOT_SIZE", 10.0), vmax)
+        # Decimal places implied by the broker volume step (e.g. 0.01→2, 0.001→3)
+        # so rounding never corrupts sub-0.01-step instruments.
+        step_decimals = max(0, min(8, -int(math.floor(math.log10(vstep))))) if vstep < 1 else 0
 
         def _round_step(v: float) -> float:
             steps = math.floor(v / vstep + 1e-9)
-            return round(steps * vstep, 2)
+            return round(steps * vstep, step_decimals)
 
         lot_size = _round_step(raw_lot)
         lot_size = max(vmin, min(max_lot, lot_size))
