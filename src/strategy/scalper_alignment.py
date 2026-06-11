@@ -130,11 +130,24 @@ class ScalperAlignmentEngine:
         if m1_direction is not None:
             if m5_direction is not None and m5_direction != m1_direction:
                 if m1_score >= 0.70:
-                    # M1 structure clear (BOS/strong trend) — trade M1 direction.
-                    # M5 penalty: score = M1 contribution only (M5 component = 0).
-                    # Combined ≥ 0.455 for m1_score=0.70, ≥ 0.52 for m1_score=0.80.
-                    direction = m1_direction
-                    raw_score = self.M1_WEIGHT * m1_score
+                    # M1 structure clear (BOS/strong trend) — only allow M1 to override M5
+                    # when the M5 slope is NOT actively fighting M1 direction.
+                    # m1=BEARISH: m5_slope should be <= 0 (M5 already turning down or flat)
+                    # m1=BULLISH: m5_slope should be >= 0 (M5 already turning up or flat)
+                    m5_slope_confirms_m1 = (
+                        (m1_direction == Direction.BULLISH and m5_slope >= -1e-7) or
+                        (m1_direction == Direction.BEARISH and m5_slope <= 1e-7)
+                    )
+                    if m5_slope_confirms_m1:
+                        # M5 slope fading or aligned with M1 — trade M1 direction.
+                        # M5 penalty: score = M1 contribution only (M5 component = 0).
+                        # Combined ≥ 0.455 for m1_score=0.70, ≥ 0.52 for m1_score=0.80.
+                        direction = m1_direction
+                        raw_score = self.M1_WEIGHT * m1_score
+                    else:
+                        # M5 slope actively fighting M1 — hard block (counter-trend entry)
+                        direction = None
+                        raw_score = min(raw_score, min_score - 0.01)
                 else:
                     # M1 weak and M5 opposing — genuinely ambiguous, block
                     direction = None
