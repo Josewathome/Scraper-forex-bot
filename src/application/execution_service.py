@@ -352,12 +352,44 @@ class ExecutionService:
                     continue  # trade closed, skip reversal check
 
             # ── 3. Reversal detection ──────────────────────────────────
-            # A fresh signal in the OPPOSITE direction with high confidence
-            # means the market has structurally reversed.  Close the trade;
-            # the entry gate will open a new one in the next M1 if conditions hold.
+            # Two triggers:
+            # (a) Fresh opposing signal at or above REVERSAL_THRESHOLD — full confidence reversal.
+            # (b) Trade already in defensive/losing mode AND M1 structure has fully flipped
+            #     against the trade direction (struct_score == 0.0) — structural reversal even
+            #     without a fully-formed opposing signal.  Threshold is lowered to 0.50 when
+            #     defensive because the market has already shown weakness.
+            effective_reversal_conf = REVERSAL_THRESHOLD
+            if state.defensive_mode and not in_profit:
+                effective_reversal_conf = 0.50  # easier to exit when already losing + defensive
+
+            # Structural reversal: if M1 BOS has fully confirmed opposite direction,
+            # exit without waiting for a fresh signal (struct_score is 0.0 when fully reversed).
+            struct_score = self._assess_continuation(
+                state, None, structure, price, pip_calc, now
+            )  # recompute without signal to isolate structure component
+            struct_reversed = (struct_score * 0.40) == 0.0 and cont < DEFENSIVE_THRESHOLD
+
+            if act and struct_reversed and state.defensive_mode and not in_profit:
+                live_pips  = (pip_calc.price_to_pips(price - state.entry)
+                              if trade_dir == Direction.BULLISH
+                              else pip_calc.price_to_pips(state.entry - price))
+                total_pips = state.accumulated_pips + live_pips
+                _outcome   = "win" if total_pips > 0 else "loss"
+                self._tr.close_trade(ticket)
+                self._trade_states.pop(ticket, None)
+                self._log_trade_summary(pos, state, pip_calc)
+                self._journal_close(ticket, total_pips, _outcome)
+                self._update_streak(symbol, total_pips)
+                logger.info(
+                    "STRUCTURAL_REVERSAL_EXIT [%s] ticket=%s | M1 structure fully reversed "
+                    "against trade | cont=%.2f | pips=%.1f | held=%.1fmin",
+                    symbol, ticket, cont, total_pips, duration_min,
+                )
+                continue
+
             if (fresh_signal is not None
                     and fresh_signal.direction != trade_dir
-                    and fresh_signal.confidence >= REVERSAL_THRESHOLD
+                    and fresh_signal.confidence >= effective_reversal_conf
                     and act):
                 live_pips  = (pip_calc.price_to_pips(price - state.entry)
                               if trade_dir == Direction.BULLISH
@@ -374,7 +406,7 @@ class ExecutionService:
                     "— closed pips=%.1f",
                     symbol, ticket,
                     fresh_signal.direction.value.upper(), fresh_signal.confidence,
-                    REVERSAL_THRESHOLD, total_pips,
+                    effective_reversal_conf, total_pips,
                 )
 
     # ── Trade execution ───────────────────────────────────────────────
@@ -961,6 +993,29 @@ class ExecutionService:
         raw_lot  = risk_params.lot_size(sl_pips, tick_value, pip_calc)
         max_lot  = getattr(config, "MAX_LOT_SIZE", 10.0)
         lot_size = max(0.01, min(max_lot, math.floor(raw_lot * 100) / 100))
+
+        # Cap lot size so the required margin never exceeds 40% of free margin.
+        # This prevents good signals from being blocked just because the risk-based
+        # lot size happens to be larger than the available margin allows.
+        # We always trade at least 0.01 lots (broker minimum); if even that
+        # exceeds 40% of free margin the margin gate in entry_gate.py will block.
+        try:
+            free_margin = self._tr.get_free_margin()
+            if free_margin and free_margin > 0:
+                safety = getattr(config, "MARGIN_SAFETY_FACTOR", 1.2)
+                margin_max_lots = math.floor(
+                    (free_margin * 0.40 / safety / 200.0) * 100
+                ) / 100
+                margin_max_lots = max(0.01, margin_max_lots)
+                if lot_size > margin_max_lots:
+                    logger.info(
+                        "LOT_CAPPED [%s] risk_lots=%.2f → margin_lots=%.2f "
+                        "(free_margin=%.2f)",
+                        signal.symbol, lot_size, margin_max_lots, free_margin,
+                    )
+                    lot_size = margin_max_lots
+        except Exception:
+            pass
         return Trade(
             id=str(uuid.uuid4()),
             symbol=signal.symbol,
