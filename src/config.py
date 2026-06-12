@@ -231,6 +231,16 @@ CHECKPOINT_RETAIN_DAYS   = 7
 DASHBOARD_ENABLED = True
 DASHBOARD_PORT    = 8080
 
+# Informational only — STREAM mode is event-driven (no fixed poll interval).
+# Surfaced/editable on the dashboard config tab; not used by the live loop.
+LOOP_INTERVAL_SECONDS: int = int(os.environ.get("LOOP_INTERVAL_SECONDS", "1"))
+
+# Initial balance used by the (optional) backtester and the dashboard's
+# backtest tab. Defaults to the configured account balance fallback.
+BACKTEST_INITIAL_BALANCE: float = float(
+    os.environ.get("BACKTEST_INITIAL_BALANCE", str(ACCOUNT_BALANCE))
+)
+
 # ── Email ─────────────────────────────────────────────────────────
 EMAIL_ENABLED   = True
 EMAIL_SMTP_HOST = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")

@@ -109,6 +109,34 @@ def test_journal_truth_and_rolling():
     assert abs(perf["avg_win_pips"] - 9.0) < 1e-9 and abs(perf["avg_loss_pips"] - 6.0) < 1e-9
 
 
+# ── 4b. Journal schema guard: legacy pip-era rows excluded from money stats ──────
+
+def test_journal_schema_guard():
+    tj = TradeJournal(path=tempfile.mktemp(suffix=".json"))
+    # Legacy (pre-fix) record: no schema, pnl stored as PIPS (gold $3 move = 300).
+    tj._trades.append({
+        "ticket": 99, "symbol": "XAUUSD", "direction": "bullish",
+        "entry": 4200, "sl": 4199, "tp": 4203, "lot_size": 0.01, "grade": "C",
+        "pnl": 300.0, "pips": 300.0, "outcome": "win",
+        "opened_at": "2026-06-01T00:00:00+00:00", "closed_at": "2026-06-01T00:05:00+00:00",
+    })
+    # New broker-truth (v2) money record.
+    tj.record_open(1, "GBPUSD", "bullish", 1.30, 1.299, 1.302, 0.02, "B")
+    tj.record_close(1, pnl=2.50, outcome="win", pips=9.0)
+
+    st = tj.get_stats()
+    # The $300 gold legacy row must NOT be counted.
+    assert st["total"] == 1 and st["wins"] == 1
+    assert abs(st["total_pnl"] - 2.50) < 1e-9, st
+    assert abs(tj.total_realized_pnl() - 2.50) < 1e-9
+    by_sym = tj.get_stats_by_symbol()
+    assert "GBPUSD" in by_sym and "XAUUSD" not in by_sym, by_sym
+    # EV rolling perf must ignore the legacy gold row entirely.
+    assert tj.rolling_performance("XAUUSD")["samples"] == 0
+    # Drawdown unaffected by the bogus +300.
+    assert tj.get_drawdown(initial_balance=140.0) <= 0.0 + 1e-9
+
+
 # ── 5. Gold ATR-adaptive stop (Option 2) ─────────────────────────────────────────
 
 def test_gold_atr_adaptive_sl():
