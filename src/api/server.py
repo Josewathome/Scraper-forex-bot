@@ -113,7 +113,7 @@ def _get_initial_balance() -> tuple:
 _CONFIG_MAP = {
     "risk_pct":           ("RISK_PERCENT",          float),
     "min_rr":             ("MIN_RR",                float),
-    "max_open_trades":    ("MAX_OPEN_TRADES",        int),
+    "max_open_trades":    ("MAX_OPEN_SYMBOLS",       int),
     "atr_cost_threshold": ("ATR_COST_THRESHOLD",    float),
     "loop_interval":      ("LOOP_INTERVAL_SECONDS", int),
     "tiered_tp_enabled":  ("TIERED_TP_ENABLED",     bool),
@@ -585,20 +585,26 @@ class DashboardServer:
         @app.route("/api/config", methods=["GET"])
         @require_auth
         def get_config():
+            # Use getattr with defaults so a renamed/removed config key can never
+            # 500 the dashboard (config drift must degrade gracefully, not crash).
             return jsonify({
-                "symbols":             config.SYMBOLS,
-                "risk_pct":            config.RISK_PERCENT,
-                "min_rr":              config.MIN_RR,
-                "max_open_trades":     config.MAX_OPEN_TRADES,
-                "atr_cost_threshold":  config.ATR_COST_THRESHOLD,
-                "loop_interval":       config.LOOP_INTERVAL_SECONDS,
-                "tiered_tp_enabled":   config.TIERED_TP_ENABLED,
-                "tiered_tp1_ratio":    config.TIERED_TP1_RATIO,
-                "tiered_tp2_ratio":    config.TIERED_TP2_RATIO,
-                "monitor_enabled":     config.MONITOR_ENABLED,
-                "breakeven_rr":        config.BREAKEVEN_RR_TRIGGER,
-                "backtest_balance":    config.BACKTEST_INITIAL_BALANCE,
-                "account_currency":   config.ACCOUNT_CURRENCY,
+                "symbols":             getattr(config, "SYMBOLS", []),
+                "risk_pct":            getattr(config, "RISK_PERCENT", 0.0),
+                "min_rr":              getattr(config, "MIN_RR", 1.5),
+                # The portfolio model is now per-symbol; surface the unique-symbol cap.
+                "max_open_trades":     getattr(config, "MAX_OPEN_SYMBOLS",
+                                               getattr(config, "MAX_OPEN_TRADES", 5)),
+                "max_trades_per_symbol": getattr(config, "MAX_TRADES_PER_SYMBOL", 4),
+                "atr_cost_threshold":  getattr(config, "ATR_COST_THRESHOLD", 0.25),
+                "loop_interval":       getattr(config, "LOOP_INTERVAL_SECONDS", 1),
+                "tiered_tp_enabled":   getattr(config, "TIERED_TP_ENABLED", True),
+                "tiered_tp1_ratio":    getattr(config, "TIERED_TP1_RATIO", 1.5),
+                "tiered_tp2_ratio":    getattr(config, "TIERED_TP2_RATIO", 2.0),
+                "monitor_enabled":     getattr(config, "MONITOR_ENABLED", True),
+                "breakeven_rr":        getattr(config, "BREAKEVEN_RR_TRIGGER", 1.5),
+                "backtest_balance":    getattr(config, "BACKTEST_INITIAL_BALANCE",
+                                               getattr(config, "ACCOUNT_BALANCE", 0.0)),
+                "account_currency":    getattr(config, "ACCOUNT_CURRENCY", "USD"),
             })
 
         @app.route("/api/config", methods=["PATCH"])
