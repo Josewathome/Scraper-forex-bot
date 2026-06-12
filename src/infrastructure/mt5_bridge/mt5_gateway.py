@@ -275,7 +275,32 @@ class MT5Gateway:
             "volume_step":         float(info.volume_step),
             "stops_level":         int(info.trade_stops_level),   # broker min stop distance in points
             "freeze_level":        int(info.trade_freeze_level),  # broker freeze distance in points
+            "filling_mode":        int(getattr(info, "filling_mode", 0)),  # supported fillings bitmask
         }
+
+    def _resolve_filling(self, symbol: str):
+        """
+        Return an order filling mode the SYMBOL actually supports.
+
+        Brokers expose supported fillings as a bitmask in symbol_info.filling_mode:
+            bit SYMBOL_FILLING_FOK (1)  → ORDER_FILLING_FOK
+            bit SYMBOL_FILLING_IOC (2)  → ORDER_FILLING_IOC
+        Hard-coding IOC caused retcode 10030 "Unsupported filling mode" on symbols
+        that only allow FOK, which silently blocked EVERY entry (and would block
+        closes too). We pick a supported mode, preferring IOC → FOK → RETURN.
+        """
+        try:
+            info = mt5.symbol_info(symbol)
+            mask = int(getattr(info, "filling_mode", 0)) if info is not None else 0
+        except Exception:
+            mask = 0
+        # SYMBOL_FILLING_IOC == 2, SYMBOL_FILLING_FOK == 1
+        if mask & 2:
+            return mt5.ORDER_FILLING_IOC
+        if mask & 1:
+            return mt5.ORDER_FILLING_FOK
+        # Unknown/neither advertised — RETURN is the safe market default.
+        return mt5.ORDER_FILLING_RETURN
 
     def get_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self._ensure_ready():
@@ -354,11 +379,11 @@ class MT5Gateway:
             "magic":        int(order.get("magic", 202400)),
             "comment":      str(order.get("comment", "ZoneBot")),
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._resolve_filling(str(order["symbol"])),
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("order_send failed: retcode=%s request=%s", 
+            logger.error("order_send failed: retcode=%s request=%s",
                          result.retcode if result else "None", request)
             return None
         return {
@@ -390,7 +415,7 @@ class MT5Gateway:
             "magic":        pos.magic,
             "comment":      "ZoneBot Close",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._resolve_filling(pos.symbol),
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
@@ -447,7 +472,7 @@ class MT5Gateway:
             "magic":        int(pos.magic),
             "comment":      comment,
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._resolve_filling(pos.symbol),
         }
 
         result = mt5.order_send(request)
@@ -491,17 +516,26 @@ class MT5Gateway:
             "price":  float(order["price"]),
             "sl":     float(order.get("sl", 0.0)),
             "tp":     float(order.get("tp", 0.0)),
+            # Use a SUPPORTED filling mode — otherwise order_check returns
+            # retcode 10030 "Unsupported filling mode" and we cannot read margin.
+            "type_filling": self._resolve_filling(str(order["symbol"])),
         }
         result = mt5.order_check(request)
         if result is None:
             logger.warning("order_check returned None for %s", order["symbol"])
             return None
-        # retcode 0 = OK; anything else means MT5 flagged a problem
-        if result.retcode != 0:
-            logger.warning("order_check retcode=%s (%s) for %s",
-                           result.retcode, result.comment, order["symbol"])
+        # The required margin is valid whenever MT5 returns a positive figure —
+        # it does not depend on filling/stops. Return it even if a non-margin
+        # retcode is flagged; only fail closed when no margin could be computed.
+        margin = float(getattr(result, "margin", 0.0) or 0.0)
+        if result.retcode not in (0, mt5.TRADE_RETCODE_DONE) and margin <= 0:
+            logger.warning("order_check retcode=%s (%s) for %s — no margin computed",
+                           result.retcode, getattr(result, "comment", ""), order["symbol"])
             return None
-        return float(result.margin)
+        if margin <= 0:
+            logger.warning("order_check returned non-positive margin for %s", order["symbol"])
+            return None
+        return margin
 
     def modify_position(self, ticket: int, sl: float, tp: float) -> Optional[Dict[str, Any]]:
         if not self._ensure_ready():
