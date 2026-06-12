@@ -17,6 +17,23 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = Path(".cache") / "trade_journal.json"
 
+# Journal record schema version. v2 = `pnl` is BROKER-TRUTH money in the account
+# currency. Records written by the original bot (no `schema`, or schema < 2)
+# stored `pnl` as PIPS — for gold a $3 move was logged as pnl=300, which the
+# dashboard would then mis-sum as $300. All money-denominated stats below
+# (totals, per-symbol P&L, drawdown, EV rolling performance) ONLY count v2+
+# records so stale pip-era rows can never corrupt the displayed figures.
+_SCHEMA = 2
+
+
+def _is_money_record(t: Dict[str, Any]) -> bool:
+    """True only for closed records whose `pnl` is real account-currency money."""
+    return (
+        t.get("outcome") not in (None, "OPEN")
+        and int(t.get("schema", 1)) >= _SCHEMA
+        and t.get("pnl") is not None
+    )
+
 
 class TradeJournal:
 
@@ -41,6 +58,7 @@ class TradeJournal:
         grade:      str = "?",
     ) -> None:
         record = {
+            "schema":    _SCHEMA,
             "ticket":    ticket,
             "symbol":    symbol,
             "direction": direction,
@@ -85,8 +103,7 @@ class TradeJournal:
         """
         closed = [
             t for t in self._trades
-            if t.get("symbol") == symbol and t.get("outcome") != "OPEN"
-            and t.get("pnl") is not None
+            if t.get("symbol") == symbol and _is_money_record(t)
         ][-n:]
         wins   = [t for t in closed if (t.get("pnl") or 0) > 0]
         losses = [t for t in closed if (t.get("pnl") or 0) < 0]
@@ -110,6 +127,13 @@ class TradeJournal:
     def get_recent(self, n: int = 50) -> List[Dict[str, Any]]:
         return self._trades[-n:]
 
+    def total_realized_pnl(self, since: Optional[str] = None) -> float:
+        """Sum of BROKER-TRUTH money P&L over v2+ closed records (optionally since ISO ts)."""
+        rows = [t for t in self._trades if _is_money_record(t)]
+        if since is not None:
+            rows = [t for t in rows if (t.get("closed_at") or "") >= since]
+        return round(sum(t.get("pnl") or 0 for t in rows), 2)
+
     def get_by_symbol(self, symbol: str) -> List[Dict[str, Any]]:
         return [t for t in self._trades if t.get("symbol") == symbol]
 
@@ -120,14 +144,14 @@ class TradeJournal:
         since:  Optional[str] = None,   # ISO timestamp — only count trades closed after this
     ) -> Dict[str, Any]:
         if trades is None:
-            closed = [t for t in self._trades if t["outcome"] != "OPEN"]
+            closed = [t for t in self._trades if _is_money_record(t)]
             if since is not None:
                 closed = [t for t in closed if (t.get("closed_at") or "") >= since]
             elif days is not None:
                 cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=days)).isoformat()
                 closed = [t for t in closed if (t.get("closed_at") or "") >= cutoff]
         else:
-            closed = [t for t in trades if t["outcome"] != "OPEN"]
+            closed = [t for t in trades if _is_money_record(t)]
 
         if not closed:
             return {"total": 0, "wins": 0, "losses": 0, "breakeven": 0,
@@ -157,7 +181,7 @@ class TradeJournal:
     ) -> float:
         """Return max drawdown % for the given period (all-time if days/since are None)."""
         all_closed = sorted(
-            [t for t in self._trades if t["outcome"] != "OPEN"],
+            [t for t in self._trades if _is_money_record(t)],
             key=lambda t: t.get("closed_at") or "",
         )
         if since is not None:
@@ -190,7 +214,7 @@ class TradeJournal:
         days:  Optional[int] = None,
         since: Optional[str] = None,   # ISO timestamp — only count trades closed after this
     ) -> Dict[str, Dict[str, Any]]:
-        all_closed = [t for t in self._trades if t["outcome"] != "OPEN"]
+        all_closed = [t for t in self._trades if _is_money_record(t)]
         if since is not None:
             all_closed = [t for t in all_closed if (t.get("closed_at") or "") >= since]
         elif days is not None:

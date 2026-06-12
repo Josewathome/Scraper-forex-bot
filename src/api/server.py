@@ -554,11 +554,10 @@ class DashboardServer:
                 try:
                     current_bal = self._balance_fn() or initial_bal
                 except Exception:
-                    all_pnl     = sum(t["pnl"] or 0 for t in self.journal.get_all() if t["outcome"] != "OPEN")
-                    current_bal = initial_bal + all_pnl
+                    # Only sum broker-truth (v2+) money records — never legacy pip rows.
+                    current_bal = initial_bal + self.journal.total_realized_pnl(since=since)
             else:
-                all_pnl     = sum(t["pnl"] or 0 for t in self.journal.get_all() if t["outcome"] != "OPEN")
-                current_bal = initial_bal + all_pnl
+                current_bal = initial_bal + self.journal.total_realized_pnl(since=since)
             change_pct = round((current_bal - initial_bal) / initial_bal * 100, 2) if initial_bal else 0.0
 
             g["initial_balance"]    = round(initial_bal, 2)
