@@ -382,6 +382,21 @@ SCALPER_ATR_SL_FRACTION: float = float(os.environ.get("SCALPER_ATR_SL_FRACTION",
 TP1_RR_RATIO: float = SCALPER_TP1_RR
 TP2_RR_RATIO: float = SCALPER_TP2_RR
 
+# ── Structure-aware take-profit ───────────────────────────────────
+# A blind 1.5R/2.0R target frequently sits past where price actually turns
+# (day-12: only 2/13 hit TP1 while 6/13 reached ≥5 pips of favourable move).
+# When enabled, TP1/TP2 are pulled in to the NEAREST reachable target:
+#   min( fixed RR , next opposing swing − buffer , ATR horizon cap ).
+TP_STRUCTURE_AWARE: bool = os.environ.get("TP_STRUCTURE_AWARE", "true").lower() == "true"
+# Cap TP at this multiple of the M5 ATR — a realistic scalp horizon.
+TP1_ATR_CAP_MULT: float = float(os.environ.get("TP1_ATR_CAP_MULT", "1.5"))
+# Exit this many pips BEFORE the opposing swing (don't sit at the level where
+# liquidity rests / price reverses). Per-symbol pip units (gold pip = $0.01).
+TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.0"))
+# Minimum reward:risk accepted AFTER capping. A reachable target below this is
+# not worth the risk → trade rejected. (MIN_RR stays the nominal/aspirational.)
+MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.0"))
+
 # ── Entry gate strategy flag ──────────────────────────────────────
 # SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
 # places NO trades until STRATEGY_GATE_ENABLED=true is set explicitly in .env.

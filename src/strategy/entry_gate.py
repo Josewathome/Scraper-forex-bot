@@ -285,8 +285,17 @@ class EntryGate:
             return None
 
         sl_dist_pips = pip_calc.price_to_pips(abs(current_price - sl_price_for_ev))
-        tp1_rr       = getattr(config, "TP1_RR_RATIO", _DEFAULT_TP1_RR)
-        tp1_dist_pips = sl_dist_pips * tp1_rr
+
+        # ── Structure-aware targets ────────────────────────────────
+        # TP1/TP2 are the NEAREST reachable target — the minimum of {fixed RR,
+        # the next opposing swing − buffer, an ATR horizon cap} — instead of a
+        # blind 1.5R that frequently sits past where price actually turns
+        # (day-12 data: only 2/13 hit TP1 while 6/13 reached ≥5 pips). h1_atr
+        # carries the M5 ATR. The cost/EV gates below evaluate this REAL target.
+        sl_price = sl_price_for_ev
+        tp1_price, tp2_price, tp1_dist_pips, eff_rr = self._compute_targets(
+            signal, current_price, sl_price, pip_calc, h1_atr
+        )
 
         # ── Gate 6a: Spread / cost sanity (fail closed) ────────────
         if not self._cost_ok(sym, tp1_dist_pips, broker_cost):
@@ -327,9 +336,6 @@ class EntryGate:
                 )
                 return None
 
-        # ── Compute SL level from swing structure ──────────────────
-        sl_price = sl_price_for_ev  # already computed above
-
         # ── Gate 8: Minimum SL distance (scalper SL floor) ────────
         _min_sl_cfg = getattr(config, "SCALPER_MIN_SL_PIPS",
                               getattr(config, "MIN_SL_PIPS", _DEFAULT_MIN_SL))
@@ -344,28 +350,17 @@ class EntryGate:
             )
             return None
 
-        # ── Compute TP levels ──────────────────────────────────────
-        sl_price_dist = abs(current_price - sl_price)
-        tp2_rr = getattr(config, "TP2_RR_RATIO", _DEFAULT_TP2_RR)
-
-        if signal.direction == Direction.BULLISH:
-            tp1_price = current_price + sl_price_dist * tp1_rr
-            tp2_price = current_price + sl_price_dist * tp2_rr
-        else:
-            tp1_price = current_price - sl_price_dist * tp1_rr
-            tp2_price = current_price - sl_price_dist * tp2_rr
-
-        # ── Gate 9: Minimum R:R — validate ACTUAL price geometry ───
-        # Reward measured to TP1 (first/partial target) vs risk to SL.
-        min_rr = getattr(config, "MIN_RR", 1.5)
-        risk_dist   = abs(current_price - sl_price)
-        reward_dist = abs(tp1_price - current_price)
-        actual_rr   = reward_dist / risk_dist if risk_dist > 0 else 0.0
-        if actual_rr < min_rr - 1e-6:   # epsilon: don't reject exactly-min R:R on FP noise
+        # ── Gate 9: Minimum R:R on the REACHABLE (capped) target ───
+        # After structure/ATR capping, require at least MIN_RR_FLOOR reward:risk
+        # — a trade whose only *reachable* target is < 1R is not worth the risk.
+        # (Nominal MIN_RR/TP1_RR still drive the uncapped target; this floor
+        # accepts the pulled-in target when a barrier sits inside 1.5R.)
+        min_rr_floor = getattr(config, "MIN_RR_FLOOR", getattr(config, "MIN_RR", 1.5))
+        if eff_rr < min_rr_floor - 1e-6:
             logger.info(
-                "ENTRY_GATE_BLOCK [%s] %s: actual_rr=%.2f < %.2f (reward=%.1f risk=%.1f pips)",
-                sym, GateBlockReason.RR_TOO_LOW, actual_rr, min_rr,
-                pip_calc.price_to_pips(reward_dist), pip_calc.price_to_pips(risk_dist),
+                "ENTRY_GATE_BLOCK [%s] %s: reachable_rr=%.2f < %.2f (tp1=%.1f sl=%.1f pips)",
+                sym, GateBlockReason.RR_TOO_LOW, eff_rr, min_rr_floor,
+                tp1_dist_pips, sl_dist_pips,
             )
             return None
 
@@ -425,11 +420,12 @@ class EntryGate:
 
         logger.info(
             "ENTRY_GATE_PASS [%s] %s | conf=%.2f tq=%.2f | grade=%s risk=%.1f%% | "
-            "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.1f | %s | daily_count=%d",
+            "entry=%.5f SL=%.5f TP1=%.5f TP2=%.5f | sl=%.1f pips | rr=%.2f%s | %s | daily_count=%d",
             sym, signal.direction.value.upper(), confidence, tq_score,
             grade, risk_pct,
             current_price, sl_price, tp1_price, tp2_price,
-            sl_dist_pips, tp1_rr,
+            sl_dist_pips, eff_rr,
+            " (capped)" if eff_rr < getattr(config, "TP1_RR_RATIO", 1.5) - 1e-6 else "",
             "EXPLORATION" if is_exploration else "EV_OK",
             self.daily_trade_count(),
         )
@@ -656,6 +652,63 @@ class EntryGate:
         except Exception as exc:
             logger.error("EV gate error for %s: %s — rejecting (fail closed)", symbol, exc)
             return "unknown"
+
+    @staticmethod
+    def _compute_targets(
+        signal:        StrategySignal,
+        current_price: float,
+        sl_price:      float,
+        pip_calc:      PipCalculator,
+        m5_atr:        float = 0.0,
+    ):
+        """
+        Structure-aware take-profit. Returns (tp1_price, tp2_price, tp1_dist_pips,
+        effective_rr).
+
+        TP1/TP2 distance = min of:
+          • nominal fixed RR   (TP1_RR_RATIO × SL, TP2_RR_RATIO × SL)
+          • structural cap     (distance to the next OPPOSING swing − buffer)
+          • ATR horizon cap     (TP1_ATR_CAP_MULT × M5 ATR — what a scalp can
+                                 realistically reach before reversing)
+
+        When a barrier/ATR limit sits inside the nominal target, BOTH targets pull
+        in to the reachable level (so we bank the move that's actually on offer
+        instead of giving it back). When nothing is near, behaviour is the
+        original 1.5R / 2.0R. Set TP_STRUCTURE_AWARE=false to disable.
+        """
+        is_long  = signal.direction == Direction.BULLISH
+        sl_dist  = abs(current_price - sl_price)
+        tp1_rr   = getattr(config, "TP1_RR_RATIO", _DEFAULT_TP1_RR)
+        tp2_rr   = getattr(config, "TP2_RR_RATIO", _DEFAULT_TP2_RR)
+        nom_tp1  = sl_dist * tp1_rr
+        nom_tp2  = sl_dist * tp2_rr
+
+        cap = float("inf")
+        if getattr(config, "TP_STRUCTURE_AWARE", True):
+            # Structural cap — the next opposing swing, minus a buffer so we exit
+            # just BEFORE the level where price tends to stall/reverse.
+            buf  = pip_calc.pips_to_price(getattr(config, "TP_STRUCT_BUFFER_PIPS", 1.0))
+            opp  = signal.last_swing_resistance if is_long else signal.last_swing_support
+            if opp is not None:
+                struct_dist = (opp - buf - current_price) if is_long else (current_price - (opp + buf))
+                if struct_dist > 0:
+                    cap = min(cap, struct_dist)
+            # ATR reachability cap.
+            if m5_atr and m5_atr > 0:
+                cap = min(cap, m5_atr * getattr(config, "TP1_ATR_CAP_MULT", 1.5))
+
+        tp1_dist = min(nom_tp1, cap)
+        tp2_dist = max(min(nom_tp2, cap), tp1_dist)   # tp2 ≥ tp1
+
+        if is_long:
+            tp1_price = current_price + tp1_dist
+            tp2_price = current_price + tp2_dist
+        else:
+            tp1_price = current_price - tp1_dist
+            tp2_price = current_price - tp2_dist
+
+        eff_rr = (tp1_dist / sl_dist) if sl_dist > 0 else 0.0
+        return tp1_price, tp2_price, pip_calc.price_to_pips(tp1_dist), eff_rr
 
     @staticmethod
     def _compute_sl(
