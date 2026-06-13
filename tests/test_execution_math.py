@@ -165,6 +165,45 @@ def test_gold_atr_adaptive_sl():
     assert sl > px and abs(pc2.price_to_pips(sl - px) - 180) < 1.0
 
 
+# ── 5b. Structure-aware / capped take-profit ─────────────────────────────────────
+
+def test_structure_aware_tp():
+    pc5 = PipCalculator(digits=5)
+    px = 1.30000
+    sl = px - 0.0010                      # 10-pip stop → nominal TP1 = 15 pips
+
+    # (a) No barrier, no ATR → behaves as original 1.5R / 2.0R.
+    tp1, tp2, d1, rr = EntryGate._compute_targets(
+        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - 15.0) < 0.01 and abs(rr - 1.5) < 1e-6
+
+    # (b) Resistance at +8 pips → TP1 capped to ~7 pips (8 − 1-pip buffer); rr<1.5.
+    sig = _Sig("GBPUSD", Direction.BULLISH, swing_hi=px + 0.0008)
+    tp1, tp2, d1, rr = EntryGate._compute_targets(sig, px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - 7.0) < 0.01, d1
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - 7.0) < 0.01    # tp2 also capped to structure
+    assert abs(rr - 0.7) < 1e-6
+
+    # (c) ATR horizon cap (M5 ATR 0.0006 = 6 pips × 1.5 = 9-pip cap) < nominal 15.
+    tp1, tp2, d1, rr = EntryGate._compute_targets(
+        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0006)
+    assert abs(d1 - 9.0) < 0.01, d1
+
+    # (d) Short side mirrors: support below caps the (downward) target.
+    sl_s = px + 0.0010
+    sig_s = _Sig("GBPUSD", Direction.BEARISH, swing_lo=px - 0.0008)
+    tp1, tp2, d1, rr = EntryGate._compute_targets(sig_s, px, sl_s, pc5, m5_atr=0.0)
+    assert tp1 < px and abs(d1 - 7.0) < 0.01
+
+    # (e) The day-12 failure: 9.9-pip move, 7.7-pip stop, nominal TP1=11.6 (missed).
+    #     A 1.5×ATR cap with ATR≈6 pips pulls TP1 to ~9 pips → now reachable.
+    sl_d = px - 0.00077
+    _, _, d1_capped, _ = EntryGate._compute_targets(
+        _Sig("USDJPY" if False else "GBPUSD", Direction.BULLISH), px, sl_d, pc5, m5_atr=0.0006)
+    nominal = 7.7 * 1.5
+    assert d1_capped < nominal and abs(d1_capped - 9.0) < 0.01
+
+
 # ── 6. FX stop sizing is UNCHANGED (swing-first) ─────────────────────────────────
 
 def test_fx_sl_unchanged():
