@@ -517,20 +517,56 @@ class ExecutionService:
         trade.mt5_ticket = ticket
         trade.status     = TradeStatus.OPEN
 
-        # Anchor ALL tracked levels to the ACTUAL fill price and the actual
-        # broker SL/TP that place_trade set (it updates trade.* to the live fill
-        # and the stop-level-nudged SL/TP). Re-anchor the software TP1/TP2 by the
-        # fill slippage so the tiered targets stay at the intended distance from
-        # the real entry, not the (now stale) signal-time price.
-        fill_delta   = trade.entry_price - signal.entry_price
-        tp1_anchored = candidate.tp1_price + fill_delta
-        tp2_anchored = trade.take_profit            # broker TP2 backstop (already at fill-ref)
-        initial_risk = abs(trade.entry_price - trade.stop_loss)
+        # ── POST-FILL VALIDATION (M1 latency / slippage guard) ─────────
+        # The trade is now LIVE at the broker's ACTUAL fill, which can differ
+        # from the signal price by up to the deviation band. The entry gate
+        # validated SIGNAL-TIME geometry — now stale. Re-validate the REAL
+        # geometry against the fill; if slippage has invalidated the trade,
+        # CLOSE it immediately (fail closed) rather than manage a position whose
+        # risk/reward no longer matches what was approved. The close costs one
+        # round-trip (~$0.6) — far cheaper than nursing a broken scalp.
+        fill_delta = trade.entry_price - signal.entry_price
+        pip_calc   = candidate.pip_calc
+        is_long    = signal.direction == Direction.BULLISH
+
+        # TP1 is the STRUCTURAL target (a fixed price); do NOT shift it by the
+        # fill slippage — shifting pushes it PAST the swing (the day-12 failure).
+        tp1_anchored   = candidate.tp1_price        # structural target, NOT slippage-shifted
+        tp2_anchored   = trade.take_profit          # broker TP2 backstop (already fill-ref)
+        actual_sl_dist = abs(trade.entry_price - trade.stop_loss)
+        try:
+            balance = self._tr.get_account_balance() or 0.0
+        except Exception:
+            balance = 0.0
+
+        # Pure decision: re-validate (1) money risk vs the hard ceiling and
+        # (2) TP1 reachable R:R, both against the ACTUAL fill (see helper).
+        abort_reason, dbg = self._post_fill_abort_reason(
+            entry=trade.entry_price, stop=trade.stop_loss, tp1=tp1_anchored,
+            is_long=is_long, lot=trade.lot_size, pip_value=candidate.pip_value,
+            balance=balance, pip_calc=pip_calc,
+        )
+        if abort_reason is not None:
+            logger.warning(
+                "POST_FILL_ABORT [%s] ticket=%s | %s | sl=%.1fp risk=%.2f tp1=%.1fp "
+                "— closing immediately",
+                symbol, ticket, abort_reason,
+                dbg["sl_pips"], dbg["risk"], dbg["tp1_pips"],
+            )
+            try:
+                self._tr.close_trade(ticket)
+            except Exception as exc:
+                logger.error("POST_FILL_ABORT close failed ticket=%s: %s", ticket, exc)
+            return None
+
+        initial_risk = actual_sl_dist
         if abs(fill_delta) > 0:
             logger.info(
-                "FILL_ANCHOR [%s] signal=%.5f fill=%.5f Δ=%.5f | SL=%.5f TP1=%.5f TP2=%.5f",
+                "FILL_CHECK [%s] signal=%.5f fill=%.5f Δ=%.5f | SL=%.5f(%.1fp) "
+                "TP1=%.5f(%.1fp) TP2=%.5f | risk=%.2f",
                 symbol, signal.entry_price, trade.entry_price, fill_delta,
-                trade.stop_loss, tp1_anchored, tp2_anchored,
+                trade.stop_loss, dbg["sl_pips"], tp1_anchored, dbg["tp1_pips"],
+                tp2_anchored, dbg["risk"],
             )
         confidence   = float(candidate.trade_score) / 100.0
         state = _OpenTradeState(
@@ -1149,6 +1185,56 @@ class ExecutionService:
                 get_analytics().record_outcome(eval_id, outcome, pips)
             except Exception as _exc:
                 logger.debug("TickAnalytics record_outcome failed: %s", _exc)
+
+    @staticmethod
+    def _post_fill_abort_reason(
+        entry:     float,
+        stop:      float,
+        tp1:       float,
+        is_long:   bool,
+        lot:       float,
+        pip_value: float,
+        balance:   float,
+        pip_calc:  PipCalculator,
+    ):
+        """
+        Pure post-fill viability check against the ACTUAL fill price.
+
+        Returns (reason_or_None, debug_dict). The entry gate validated
+        SIGNAL-TIME geometry; the broker fills at a price that may differ by up
+        to the deviation band, so the live trade must be re-validated:
+
+          (1) MONEY RISK — adverse slippage widens the real stop distance (the
+              SL is a fixed structural price). If realised risk exceeds the hard
+              MAX_TRADE_RISK_PCT ceiling (with a 5% tolerance band), abort.
+          (2) TP1 GEOMETRY — favorable slippage can run price toward the
+              structural target before fill, leaving TP1 on the wrong side or
+              below MIN_RR_FLOOR × the real stop. If the reachable reward no
+              longer justifies the risk, abort.
+
+        reason is None when the trade is still viable.
+        """
+        sl_pips = pip_calc.price_to_pips(abs(entry - stop))
+        risk    = sl_pips * pip_value * lot
+        max_risk = balance * (getattr(config, "MAX_TRADE_RISK_PCT", 3.0) / 100.0)
+        tp1_dist = (tp1 - entry) if is_long else (entry - tp1)
+        tp1_pips = pip_calc.price_to_pips(tp1_dist) if tp1_dist > 0 else 0.0
+        min_rr   = getattr(config, "MIN_RR_FLOOR", 0.8)
+        dbg = {"sl_pips": sl_pips, "risk": risk, "tp1_pips": tp1_pips}
+
+        if balance > 0 and risk > max_risk * 1.05:
+            return (
+                "slippage widened risk to %.2f (%.1f%% > ceiling %.2f)" % (
+                    risk, (risk / balance * 100.0), max_risk),
+                dbg,
+            )
+        if tp1_dist <= 0 or (sl_pips > 0 and tp1_pips < min_rr * sl_pips):
+            return (
+                "slippage compressed TP1 to %.1f pips (need ≥ %.2f×%.1f = %.1f)" % (
+                    tp1_pips, min_rr, sl_pips, min_rr * sl_pips),
+                dbg,
+            )
+        return (None, dbg)
 
     def _build_trade(
         self,

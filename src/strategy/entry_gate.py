@@ -636,6 +636,11 @@ class EntryGate:
                 source   = f"rolling(n={perf['samples']})"
             else:
                 win_rate = max(0.0, win_rate - getattr(config, "ASSUMED_WIN_RATE_HAIRCUT", 0.05))
+                # Bootstrap only: charge a slippage allowance so the gate models the
+                # REAL ~56% break-even (spread+commission alone imply ~50%, which lets
+                # through trades that only win under perfect fills). Rolling broker-truth
+                # avg_win/avg_loss already include realised slippage — never add it there.
+                cost += getattr(config, "EV_SLIPPAGE_PIPS", 1.0)
 
             ev = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss) - cost
             if ev < ev_min:
@@ -662,43 +667,63 @@ class EntryGate:
         m5_atr:        float = 0.0,
     ):
         """
-        Structure-aware take-profit. Returns (tp1_price, tp2_price, tp1_dist_pips,
-        effective_rr).
+        Fully structure-driven take-profit. Returns (tp1_price, tp2_price,
+        tp1_dist_pips, effective_rr).
 
-        TP1/TP2 distance = min of:
-          • nominal fixed RR   (TP1_RR_RATIO × SL, TP2_RR_RATIO × SL)
-          • structural cap     (distance to the next OPPOSING swing − buffer)
-          • ATR horizon cap     (TP1_ATR_CAP_MULT × M5 ATR — what a scalp can
-                                 realistically reach before reversing)
+        PRIMARY: target the actual market-structure levels carried on the signal
+        (`tp_levels` — opposing swing highs/lows, nearest first). TP1 = nearest
+        opposing swing − buffer (the first place price is likely to react);
+        TP2 = the next swing beyond it (else exit all at TP1). These are where
+        price genuinely turns, so the target is neither blindly far (1.5R past a
+        wall) nor arbitrarily tight (an ATR guess).
 
-        When a barrier/ATR limit sits inside the nominal target, BOTH targets pull
-        in to the reachable level (so we bank the move that's actually on offer
-        instead of giving it back). When nothing is near, behaviour is the
-        original 1.5R / 2.0R. Set TP_STRUCTURE_AWARE=false to disable.
+        FALLBACK (only when no structural level exists beyond price — e.g. a
+        breakout making new highs): fixed RR (TP1_RR_RATIO / TP2_RR_RATIO),
+        optionally ATR-capped. Disable structure with TP_STRUCTURE_AWARE=false.
+
+        Gate 9 (MIN_RR_FLOOR) + the EV gate still arbitrate: if the nearest real
+        target is too close to be worth the risk, the trade is rejected.
         """
         is_long  = signal.direction == Direction.BULLISH
         sl_dist  = abs(current_price - sl_price)
         tp1_rr   = getattr(config, "TP1_RR_RATIO", _DEFAULT_TP1_RR)
         tp2_rr   = getattr(config, "TP2_RR_RATIO", _DEFAULT_TP2_RR)
-        nom_tp1  = sl_dist * tp1_rr
-        nom_tp2  = sl_dist * tp2_rr
+        buf      = pip_calc.pips_to_price(getattr(config, "TP_STRUCT_BUFFER_PIPS", 1.0))
 
-        cap = float("inf")
+        tp1_dist = None
+        tp2_dist = None
+
         if getattr(config, "TP_STRUCTURE_AWARE", True):
-            # Structural cap — the next opposing swing, minus a buffer so we exit
-            # just BEFORE the level where price tends to stall/reverse.
-            buf  = pip_calc.pips_to_price(getattr(config, "TP_STRUCT_BUFFER_PIPS", 1.0))
-            opp  = signal.last_swing_resistance if is_long else signal.last_swing_support
-            if opp is not None:
-                struct_dist = (opp - buf - current_price) if is_long else (current_price - (opp + buf))
-                if struct_dist > 0:
-                    cap = min(cap, struct_dist)
-            # ATR reachability cap.
-            if m5_atr and m5_atr > 0:
-                cap = min(cap, m5_atr * getattr(config, "TP1_ATR_CAP_MULT", 1.5))
+            levels = list(getattr(signal, "tp_levels", []) or [])
+            if is_long:
+                # opposing levels above price, buffered, nearest first
+                tgts = sorted(p - buf for p in levels if (p - buf) - current_price > 0)
+                if tgts:
+                    tp1_dist = tgts[0] - current_price
+                    if len(tgts) > 1:
+                        tp2_dist = tgts[1] - current_price
+            else:
+                tgts = sorted((p + buf for p in levels if current_price - (p + buf) > 0),
+                              reverse=True)
+                if tgts:
+                    tp1_dist = current_price - tgts[0]
+                    if len(tgts) > 1:
+                        tp2_dist = current_price - tgts[1]
 
-        tp1_dist = min(nom_tp1, cap)
-        tp2_dist = max(min(nom_tp2, cap), tp1_dist)   # tp2 ≥ tp1
+        source = "structure"
+        if tp1_dist is None or tp1_dist <= 0:
+            # Fallback: fixed RR, optionally ATR-capped (no structural target).
+            nom1 = sl_dist * tp1_rr
+            nom2 = sl_dist * tp2_rr
+            cap  = (m5_atr * getattr(config, "TP1_ATR_CAP_MULT", 2.5)
+                    if (m5_atr and m5_atr > 0) else float("inf"))
+            tp1_dist = min(nom1, cap)
+            tp2_dist = max(min(nom2, cap), tp1_dist)
+            source = "fallback"
+        elif tp2_dist is None or tp2_dist < tp1_dist:
+            # Only one structural level → exit fully at it (no runner past the
+            # only known barrier).
+            tp2_dist = tp1_dist
 
         if is_long:
             tp1_price = current_price + tp1_dist

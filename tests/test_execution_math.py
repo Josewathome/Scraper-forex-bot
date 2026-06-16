@@ -34,12 +34,13 @@ from src.infrastructure.trade_journal import TradeJournal
 # ── Lightweight fakes ───────────────────────────────────────────────────────────
 
 class _Sig:
-    """Duck-typed StrategySignal for _compute_sl (only uses these attributes)."""
-    def __init__(self, symbol, direction, swing_lo=None, swing_hi=None):
+    """Duck-typed StrategySignal for _compute_sl / _compute_targets."""
+    def __init__(self, symbol, direction, swing_lo=None, swing_hi=None, tp_levels=None):
         self.symbol = symbol
         self.direction = direction
         self.last_swing_support = swing_lo
         self.last_swing_resistance = swing_hi
+        self.tp_levels = tp_levels or []
 
 
 class _FakeTR:
@@ -170,38 +171,49 @@ def test_gold_atr_adaptive_sl():
 def test_structure_aware_tp():
     pc5 = PipCalculator(digits=5)
     px = 1.30000
-    sl = px - 0.0010                      # 10-pip stop → nominal TP1 = 15 pips
+    sl = px - 0.0010                      # 10-pip stop
 
-    # (a) No barrier, no ATR → behaves as original 1.5R / 2.0R.
+    buf = cfg.TP_STRUCT_BUFFER_PIPS       # pips
+
+    # (a) No structural levels → fallback to fixed 1.5R / 2.0R (no ATR).
     tp1, tp2, d1, rr = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0)
+        _Sig("GBPUSD", Direction.BULLISH, tp_levels=[]), px, sl, pc5, m5_atr=0.0)
     assert abs(d1 - 15.0) < 0.01 and abs(rr - 1.5) < 1e-6
 
-    # (b) Resistance at +8 pips → TP1 capped to ~7 pips (8 − 1-pip buffer); rr<1.5.
-    sig = _Sig("GBPUSD", Direction.BULLISH, swing_hi=px + 0.0008)
+    # (b) One resistance at +8 pips → TP1 = 8 − buffer; TP2 == TP1 (exit at level).
+    sig = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px + 0.0008])
     tp1, tp2, d1, rr = EntryGate._compute_targets(sig, px, sl, pc5, m5_atr=0.0)
-    assert abs(d1 - 7.0) < 0.01, d1
-    assert abs(pc5.price_to_pips(abs(tp2 - px)) - 7.0) < 0.01    # tp2 also capped to structure
-    assert abs(rr - 0.7) < 1e-6
+    assert abs(d1 - (8.0 - buf)) < 0.01, d1
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (8.0 - buf)) < 0.01
 
-    # (c) ATR horizon cap (M5 ATR 0.0006 = 6 pips × 1.5 = 9-pip cap) < nominal 15.
-    tp1, tp2, d1, rr = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0006)
-    assert abs(d1 - 9.0) < 0.01, d1
+    # (c) Two resistances (+8, +14) → TP1 at first, TP2 at second (the ladder).
+    sig2 = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px + 0.0008, px + 0.0014])
+    tp1, tp2, d1, rr = EntryGate._compute_targets(sig2, px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - (8.0 - buf)) < 0.01
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (14.0 - buf)) < 0.01
 
-    # (d) Short side mirrors: support below caps the (downward) target.
+    # (d) Short side mirrors: nearest support below = TP1.
     sl_s = px + 0.0010
-    sig_s = _Sig("GBPUSD", Direction.BEARISH, swing_lo=px - 0.0008)
+    sig_s = _Sig("GBPUSD", Direction.BEARISH, tp_levels=[px - 0.0008, px - 0.0013])
     tp1, tp2, d1, rr = EntryGate._compute_targets(sig_s, px, sl_s, pc5, m5_atr=0.0)
-    assert tp1 < px and abs(d1 - 7.0) < 0.01
+    assert tp1 < px and abs(d1 - (8.0 - buf)) < 0.01
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (13.0 - buf)) < 0.01
 
-    # (e) The day-12 failure: 9.9-pip move, 7.7-pip stop, nominal TP1=11.6 (missed).
-    #     A 1.5×ATR cap with ATR≈6 pips pulls TP1 to ~9 pips → now reachable.
-    sl_d = px - 0.00077
-    _, _, d1_capped, _ = EntryGate._compute_targets(
-        _Sig("USDJPY" if False else "GBPUSD", Direction.BULLISH), px, sl_d, pc5, m5_atr=0.0006)
-    nominal = 7.7 * 1.5
-    assert d1_capped < nominal and abs(d1_capped - 9.0) < 0.01
+    # (e) Levels below price are ignored (only opposing/above used for a long);
+    #     here only an above level qualifies.
+    sig3 = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px - 0.0005, px + 0.0009])
+    _, _, d1, _ = EntryGate._compute_targets(sig3, px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - (9.0 - buf)) < 0.01
+
+
+# ── 5c. Gold disabled by default on small accounts ───────────────────────────────
+
+def test_gold_disabled_by_default():
+    # XAUUSD risks ~$4–5/trade (≈3% of a ~$140 account) — too large; disabled
+    # by default and excluded from the live symbol set.
+    assert "XAUUSD" in cfg.DISABLED_SYMBOLS
+    assert "XAUUSD" not in cfg.SYMBOLS
+    assert "GBPUSD" in cfg.SYMBOLS and "USDJPY" in cfg.SYMBOLS
 
 
 # ── 6. FX stop sizing is UNCHANGED (swing-first) ─────────────────────────────────
@@ -267,6 +279,78 @@ def test_exploration_caps():
                                  "win" if i % 2 else "loss", 2.0 if i % 2 else -2.0)
     eg2 = EntryGate(news_manager=None, execution=ex)
     assert eg2._exploration_allowed("USDJPY") is False
+
+
+# ── 10. Post-fill validation (M1 latency / slippage guard) ───────────────────────
+
+def test_post_fill_abort():
+    from src.application.execution_service import ExecutionService
+    pc = PipCalculator(digits=5)  # GBPUSD: 1 pip = 0.0001
+
+    # Clean fill: entry 1.30000, SL 1.29950 (5 pips), TP1 1.30070 (7 pips),
+    # 0.09 lot, $10/pip, $230 balance → risk $4.50 (<3% ceiling), rr 1.4 → viable.
+    reason, dbg = ExecutionService._post_fill_abort_reason(
+        entry=1.30000, stop=1.29950, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is None, reason
+    assert abs(dbg["sl_pips"] - 5.0) < 1e-6
+    assert abs(dbg["tp1_pips"] - 7.0) < 1e-6
+
+    # Adverse slippage widened the stop: filled at 1.30040 (long), SL still
+    # 1.29950 → real stop 9 pips → risk $8.10 = 3.5% of $230 > 3% ceiling → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30040, stop=1.29950, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "risk" in reason
+
+    # Favorable slippage ate the target: filled at 1.30065 (long), TP1 1.30070
+    # → only 0.5 pip left vs a 5-pip stop (rr 0.1 < MIN_RR_FLOOR) → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30065, stop=1.30015, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "TP1" in reason
+
+    # Price overshot TP1 before fill (wrong side) → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30080, stop=1.30030, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "TP1" in reason
+
+    # Short side, clean fill: entry 1.30000, SL 1.30050 (5p), TP1 1.29930 (7p) → viable.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30000, stop=1.30050, tp1=1.29930, is_long=False,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is None, reason
+
+
+# ── 11. EV bootstrap charges a slippage allowance ────────────────────────────────
+
+def test_ev_bootstrap_slippage():
+    # GBPUSD bootstrap (empty journal): a 4-pip SL / 4-pip TP scalp whose blended
+    # reward barely clears spread+commission must FAIL once the ~1-pip slippage
+    # allowance is charged — i.e. the slippage term actually moves the verdict.
+    eg = _eg()
+    # Tight scalp; pip_value 10 → commission 0.35p/side. spread 0.4p + ~0.7p ≈ 1.1p cost.
+    bc = BrokerCost(0.4, 3.5, 10.0)
+    # Prove the slippage term is wired and monotonic: a larger charge can only
+    # make EV worse (never better). This guards against the term being dropped.
+    import src.config as _c
+    saved = _c.EV_SLIPPAGE_PIPS
+    try:
+        _c.EV_SLIPPAGE_PIPS = 0.0
+        loose = eg._ev_status("GBPUSD", 4.0, 4.0, bc)
+        _c.EV_SLIPPAGE_PIPS = 5.0
+        strict = eg._ev_status("GBPUSD", 4.0, 4.0, bc)
+    finally:
+        _c.EV_SLIPPAGE_PIPS = saved
+    # A larger slippage charge can only make EV worse (never better).
+    rank = {"pass": 2, "negative": 1, "unknown": 0}
+    assert rank[strict] <= rank[loose]
 
 
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────

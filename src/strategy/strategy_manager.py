@@ -12,7 +12,7 @@ Called from main_stream.py on:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -43,6 +43,11 @@ class StrategySignal:
     proposed_entry: float              # current mid-price at signal time
     last_swing_support:  Optional[float]   # nearest swing low (for longs)
     last_swing_resistance: Optional[float] # nearest swing high (for shorts)
+
+    # Ordered opposing structural levels for take-profit targeting (nearest
+    # first): swing highs above price for longs, swing lows below for shorts.
+    # The entry gate places TP1/TP2 at these real levels (fully structure-driven).
+    tp_levels: list = field(default_factory=list)
 
     # Trade quality score from GATE7 TradeQualityScorer (0.0–1.0).
     # Used by MarginManager for quality-weighted position sizing.
@@ -401,9 +406,22 @@ class StrategyManager:
         structure = self._structure.get(symbol)
         swing_tf  = Timeframe.M1
 
+        tp_levels: list = []
         if structure is not None:
             last_swing_support    = structure.last_swing_low(swing_tf)
             last_swing_resistance = structure.last_swing_high(swing_tf)
+            # Ordered opposing structural levels for TP targeting — M1 (near) +
+            # M5 (extension), deduped, nearest-first relative to current price.
+            if direction == Direction.BULLISH:
+                highs = (structure.get_swing_highs(Timeframe.M1)
+                         + structure.get_swing_highs(Timeframe.M5))
+                tp_levels = sorted({round(sp.price, 6) for sp in highs
+                                    if sp.price > current_price})
+            else:
+                lows = (structure.get_swing_lows(Timeframe.M1)
+                        + structure.get_swing_lows(Timeframe.M5))
+                tp_levels = sorted({round(sp.price, 6) for sp in lows
+                                    if sp.price < current_price}, reverse=True)
         else:
             last_swing_support    = None
             last_swing_resistance = None
@@ -419,6 +437,7 @@ class StrategyManager:
             proposed_entry=current_price,
             last_swing_support=last_swing_support.price if last_swing_support else None,
             last_swing_resistance=last_swing_resistance.price if last_swing_resistance else None,
+            tp_levels=tp_levels,
             tq_score=round(tq.score, 3) if tq is not None else 0.0,
         )
 
