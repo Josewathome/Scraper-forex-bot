@@ -97,7 +97,7 @@ MAX_OPEN_SYMBOLS: int = int(os.environ.get("MAX_OPEN_SYMBOLS", "5"))
 # B/C/D trades: 1 additional slot beyond the A-grade trades (total cap 4)
 # Hard per-symbol ceiling regardless of grade.
 MAX_TRADES_PER_SYMBOL_A:     int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A",   "3"))
-MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "4"))
+MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "2"))
 
 MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
 
@@ -120,7 +120,7 @@ MARGIN_RESERVE_PCT:    float = float(os.environ.get("MARGIN_RESERVE_PCT",     "0
 # Maximum total open exposure as fraction of equity.
 MAX_EQUITY_EXPOSURE:   float = float(os.environ.get("MAX_EQUITY_EXPOSURE",    "0.60"))
 # Maximum correlated-currency exposure (trades sharing the same currency leg).
-MAX_CURRENCY_EXPOSURE: int   = int(os.environ.get("MAX_CURRENCY_EXPOSURE",    "3"))
+MAX_CURRENCY_EXPOSURE: int   = int(os.environ.get("MAX_CURRENCY_EXPOSURE",    "2"))
 
 # ── Daily drawdown circuit breaker ────────────────────────────────
 # If equity drops this % below the day's opening equity, all new entries
@@ -184,7 +184,7 @@ LOSS_STREAK_PAUSE_HOURS     = float(os.environ.get("LOSS_STREAK_PAUSE_HOURS", "2
 # ── Multi-level Take Profit ────────────────────────────────────────
 TIERED_TP_ENABLED        = True
 TIERED_TP1_RATIO         = 1.5
-TIERED_TP1_CLOSE_PCT          = 0.60
+TIERED_TP1_CLOSE_PCT          = 0.50
 TIERED_TP1_CLOSE_PCT_A_PLUS   = 0.40
 TIERED_TP1_CLOSE_PCT_B        = 0.50
 TIERED_TP2_RATIO         = 2.0
@@ -199,6 +199,11 @@ MONITOR_TRAIL_ATR_BUFFER = 0.5
 
 # ── TRADE QUALITY SCORING ─────────────────────────────────────────
 TRADE_SCORE_THRESHOLD   = 2
+# Minimum composite TradeQuality score (0.0–1.0) for entry to proceed.
+# 0.60 = requires all four quality components to score above the neutral
+# midpoint on average. Below this composite, the market physics do not
+# support the entry (momentum weak, not at structure, poor regime, etc.).
+TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.60"))
 
 # ── DYNAMIC POSITION SIZING ───────────────────────────────────────
 # Quality-weighted risk per grade (now wired via MarginManager):
@@ -302,7 +307,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.0"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable
+SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.5"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
@@ -412,7 +417,7 @@ TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.
 # rejected most of them. The EV gate (which uses the REAL rolling win rate) is
 # the true arbiter of whether a sub-1R scalp is worth taking; this floor only
 # blocks genuinely poor reward:risk. (MIN_RR stays the nominal/aspirational.)
-MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "0.8"))
+MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.5"))
 
 # ── Entry gate strategy flag ──────────────────────────────────────
 # SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
@@ -463,7 +468,7 @@ RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",         
 # edge requirement (every other gate — news, spread/cost, margin, R:R, session,
 # velocity — still applies). These gather real outcomes so the rolling EV can
 # take over. Exploration trades are forced to the lowest risk grade.
-EXPLORATION_ENABLED:        bool = os.environ.get("EXPLORATION_ENABLED", "true").lower() == "true"
+EXPLORATION_ENABLED:        bool = os.environ.get("EXPLORATION_ENABLED", "false").lower() == "true"
 EXPLORATION_TRADES_PER_DAY: int  = int(os.environ.get("EXPLORATION_TRADES_PER_DAY", "3"))  # per symbol — lowered 8→3: at 8×4 symbols = 32 EV-bypassed probes/day, a systematic bootstrap drain. 3 still gathers samples without bleeding the account.
 
 # ── Reversal re-entry cooldown ────────────────────────────────────
@@ -480,7 +485,7 @@ RANGING_ALIGN_PENALTY: float = float(os.environ.get("RANGING_ALIGN_PENALTY", "0.
 # Round-trip cost (spread + commission) must be no more than this fraction of
 # the TP1 target distance, otherwise the trade is rejected — a scalp whose
 # target is eaten by cost has no edge. Also rejects on missing/insane spread.
-COST_MAX_FRACTION_OF_TARGET: float = float(os.environ.get("COST_MAX_FRACTION_OF_TARGET", "0.40"))
+COST_MAX_FRACTION_OF_TARGET: float = float(os.environ.get("COST_MAX_FRACTION_OF_TARGET", "0.25"))
 MAX_SPREAD_PIPS: float = float(os.environ.get("MAX_SPREAD_PIPS", "40.0"))
 
 # ── News data freshness (fail-closed) ─────────────────────────────

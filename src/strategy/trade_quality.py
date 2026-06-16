@@ -61,13 +61,15 @@ class TradeQuality:
     atr:               float   # ATR used for normalization
     detail:            str     # human-readable summary
 
-    def passes_minimum(self, signal_confidence: float, base_min: float = 0.45) -> bool:
+    def passes_minimum(self, signal_confidence: float, base_min: float | None = None) -> bool:
         """Dynamic minimum: weaker signals require higher-quality entries."""
-        # Reduce the minimum floor as confidence increases
+        if base_min is None:
+            import src.config as _cfg
+            base_min = getattr(_cfg, "TQ_BASE_MIN", 0.60)
         # confidence 1.0 → min = base_min - 0.05
         # confidence 0.6 → min = base_min + 0.04
         dynamic_min = base_min + (0.70 - signal_confidence) * 0.10
-        dynamic_min = max(0.35, min(0.65, dynamic_min))
+        dynamic_min = max(0.50, min(0.75, dynamic_min))
         return self.score >= dynamic_min
 
 
