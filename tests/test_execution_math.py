@@ -401,6 +401,30 @@ def test_edge_floors():
             setattr(_c, attr, saved)
 
 
+# ── 13. Deterministic trade-quality floor (Phase 0.5) ────────────────────────────
+
+def test_tq_passes_minimum_deterministic():
+    """passes_minimum() is a single static floor, with NO coupling to any other
+    score. The same TQ score yields the same verdict regardless of context."""
+    from src.strategy.trade_quality import TradeQuality
+
+    def _tq(score: float) -> TradeQuality:
+        return TradeQuality(score=score, momentum_score=0.0, structural_score=0.0,
+                            alignment_score=0.0, condition_score=0.0,
+                            at_key_level=False, atr=0.0001, detail="")
+
+    floor = cfg.TQ_BASE_MIN
+    # Just below the floor fails; at/above passes — deterministically.
+    assert _tq(floor - 0.001).passes_minimum() is False
+    assert _tq(floor).passes_minimum() is True
+    assert _tq(floor + 0.10).passes_minimum() is True
+    # Explicit base_min override is honoured.
+    assert _tq(0.55).passes_minimum(base_min=0.50) is True
+    assert _tq(0.55).passes_minimum(base_min=0.60) is False
+    # Determinism: verdict does not depend on call order / external state.
+    assert _tq(floor).passes_minimum() == _tq(floor).passes_minimum()
+
+
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────
 
 def _run_all() -> int:

@@ -359,6 +359,15 @@ class StrategyManager:
                 )
                 return None
 
+        # ── Confidence — computed ONCE here, reused for GATE7 and the signal.
+        # (Phase 0.5: was duplicated as `pre_conf` and `confidence`, two
+        # byte-identical formulas. Single source of truth now.)
+        confidence = (
+            alignment.score          * 0.50 +
+            tick_result.score        * 0.30 +
+            abs(candle_result.score) * 0.20
+        )
+
         # ── Gate 7: Trade quality score (autonomous entry quality) ───────
         try:
             from src.strategy.trade_quality import compute_trade_quality
@@ -373,13 +382,11 @@ class StrategyManager:
                 m1_candles=m1_candles,
                 m5_candles=h1_candles,  # M5 candles passed via this slot
             )
-            # Preliminary confidence estimate for dynamic minimum
-            pre_conf = alignment.score * 0.50 + tick_result.score * 0.30 + abs(candle_result.score) * 0.20
-            if not tq.passes_minimum(pre_conf):
+            if not tq.passes_minimum():
                 logger.info(
-                    "GATE7 BLOCK [%s] trade_quality=%.3f < dynamic_min | "
+                    "GATE7 BLOCK [%s] trade_quality=%.3f < TQ_BASE_MIN=%.2f | "
                     "mom=%.2f struct=%.2f align=%.2f cond=%.2f key_level=%s",
-                    symbol, tq.score,
+                    symbol, tq.score, getattr(config, "TQ_BASE_MIN", 0.60),
                     tq.momentum_score, tq.structural_score,
                     tq.alignment_score, tq.condition_score, tq.at_key_level,
                 )
@@ -396,10 +403,20 @@ class StrategyManager:
             return None
 
         # ── All gates passed — build signal ───────────────────────────
-        confidence = (
-            alignment.score          * 0.50 +
-            tick_result.score        * 0.30 +
-            abs(candle_result.score) * 0.20
+        # Unified decision record: every score + the threshold it cleared, in ONE
+        # line, so any entry is reconstructable from a single log without stitching
+        # together the per-gate lines above.
+        logger.info(
+            "ENTRY_DECISION [%s] dir=%s PASS | conf=%.3f | align=%.3f(≥%.2f) "
+            "tick=%.3f(≥%.2f) candle=%.3f(≥%.3f) | tq=%.3f(≥%.2f)["
+            "mom=%.2f struct=%.2f(key=%s) align=%.2f cond=%.2f] | regime=%s",
+            symbol, direction.value, confidence,
+            alignment.score, entry_ctx.effective_align_threshold,
+            tick_result.score, entry_ctx.effective_tick_threshold,
+            abs(candle_result.score), entry_ctx.effective_candle_threshold,
+            tq.score, getattr(config, "TQ_BASE_MIN", 0.60),
+            tq.momentum_score, tq.structural_score, tq.at_key_level,
+            tq.alignment_score, tq.condition_score, alignment.regime.value,
         )
 
         # Get swing reference levels for SL guidance from M1 structure manager.
