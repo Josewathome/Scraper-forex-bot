@@ -714,6 +714,13 @@ def _do_checkpoint(
 
 if __name__ == "__main__":
     _setup_logging()
+
+    # Refuse to start trading if config violates edge-first minimums.
+    # Only enforced when STRATEGY_GATE_ENABLED=true (observe mode still starts).
+    if getattr(config, "STRATEGY_GATE_ENABLED", False):
+        from src.edge_floors import validate_edge_floors
+        validate_edge_floors()
+
     logger.info("-" * 50)
     logger.info("  Scalper Bot (STREAM MODE)  |  account=%s  |  server=%s",
                 config.TRADING_ID, config.MT5_SERVER)

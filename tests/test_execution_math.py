@@ -254,7 +254,13 @@ def test_ev_status_and_gold_viability():
     assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(20.0, 3.5, 0.0)) == "unknown"
     # NEW gold params: marginal bootstrap EV → "negative" but exploration-eligible.
     assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(20.0, 3.5, 1.0)) == "negative"
-    assert eg._exploration_allowed("XAUUSD") is True
+    # Exploration is disabled by default (edge floor); enable to test the mechanism.
+    _saved_expl = cfg.EXPLORATION_ENABLED
+    cfg.EXPLORATION_ENABLED = True
+    try:
+        assert eg._exploration_allowed("XAUUSD") is True
+    finally:
+        cfg.EXPLORATION_ENABLED = _saved_expl
     # Tight gold spread → outright EV pass.
     assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(5.0, 3.5, 1.0)) == "pass"
     # OLD gold params (10-pip SL / 15-pip TP) were impossible — cost gate rejects.
@@ -266,19 +272,25 @@ def test_ev_status_and_gold_viability():
 def test_exploration_caps():
     eg = _eg()
     sym = "GBPUSD"
-    assert eg._exploration_allowed(sym) is True              # fresh journal → allowed
-    for _ in range(cfg.EXPLORATION_TRADES_PER_DAY):
-        eg.record_exploration(sym)
-    assert eg._exploration_allowed(sym) is False             # daily cap exhausted
+    # Exploration is disabled by default (edge floor); enable to test the cap mechanism.
+    _saved_expl = cfg.EXPLORATION_ENABLED
+    cfg.EXPLORATION_ENABLED = True
+    try:
+        assert eg._exploration_allowed(sym) is True              # fresh journal → allowed
+        for _ in range(cfg.EXPLORATION_TRADES_PER_DAY):
+            eg.record_exploration(sym)
+        assert eg._exploration_allowed(sym) is False             # daily cap exhausted
 
-    # With ≥ EV_MIN_SAMPLES real closed trades, exploration turns off (rolling EV governs).
-    ex = _FakeExec()
-    for i in range(cfg.EV_MIN_SAMPLES + 5):
-        ex._journal.record_open(i, "USDJPY", "bullish", 1, 0.99, 1.02, 0.1, "C")
-        ex._journal.record_close(i, 1.0 if i % 2 else -1.0,
-                                 "win" if i % 2 else "loss", 2.0 if i % 2 else -2.0)
-    eg2 = EntryGate(news_manager=None, execution=ex)
-    assert eg2._exploration_allowed("USDJPY") is False
+        # With ≥ EV_MIN_SAMPLES real closed trades, exploration turns off (rolling EV governs).
+        ex = _FakeExec()
+        for i in range(cfg.EV_MIN_SAMPLES + 5):
+            ex._journal.record_open(i, "USDJPY", "bullish", 1, 0.99, 1.02, 0.1, "C")
+            ex._journal.record_close(i, 1.0 if i % 2 else -1.0,
+                                     "win" if i % 2 else "loss", 2.0 if i % 2 else -2.0)
+        eg2 = EntryGate(news_manager=None, execution=ex)
+        assert eg2._exploration_allowed("USDJPY") is False
+    finally:
+        cfg.EXPLORATION_ENABLED = _saved_expl
 
 
 # ── 10. Post-fill validation (M1 latency / slippage guard) ───────────────────────
@@ -287,15 +299,15 @@ def test_post_fill_abort():
     from src.application.execution_service import ExecutionService
     pc = PipCalculator(digits=5)  # GBPUSD: 1 pip = 0.0001
 
-    # Clean fill: entry 1.30000, SL 1.29950 (5 pips), TP1 1.30070 (7 pips),
-    # 0.09 lot, $10/pip, $230 balance → risk $4.50 (<3% ceiling), rr 1.4 → viable.
+    # Clean fill: entry 1.30000, SL 1.29950 (5 pips), TP1 1.30080 (8 pips),
+    # 0.09 lot, $10/pip, $230 balance → risk $4.50 (<3% ceiling), rr 1.6 → viable.
     reason, dbg = ExecutionService._post_fill_abort_reason(
-        entry=1.30000, stop=1.29950, tp1=1.30070, is_long=True,
+        entry=1.30000, stop=1.29950, tp1=1.30080, is_long=True,
         lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
     )
     assert reason is None, reason
     assert abs(dbg["sl_pips"] - 5.0) < 1e-6
-    assert abs(dbg["tp1_pips"] - 7.0) < 1e-6
+    assert abs(dbg["tp1_pips"] - 8.0) < 1e-6
 
     # Adverse slippage widened the stop: filled at 1.30040 (long), SL still
     # 1.29950 → real stop 9 pips → risk $8.10 = 3.5% of $230 > 3% ceiling → ABORT.
@@ -320,9 +332,9 @@ def test_post_fill_abort():
     )
     assert reason is not None and "TP1" in reason
 
-    # Short side, clean fill: entry 1.30000, SL 1.30050 (5p), TP1 1.29930 (7p) → viable.
+    # Short side, clean fill: entry 1.30000, SL 1.30050 (5p), TP1 1.29920 (8p) → rr 1.6 viable.
     reason, _ = ExecutionService._post_fill_abort_reason(
-        entry=1.30000, stop=1.30050, tp1=1.29930, is_long=False,
+        entry=1.30000, stop=1.30050, tp1=1.29920, is_long=False,
         lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
     )
     assert reason is None, reason
@@ -351,6 +363,66 @@ def test_ev_bootstrap_slippage():
     # A larger slippage charge can only make EV worse (never better).
     rank = {"pass": 2, "negative": 1, "unknown": 0}
     assert rank[strict] <= rank[loose]
+
+
+# ── 12. Edge-first startup floors ────────────────────────────────────────────────
+
+def test_edge_floors():
+    """The startup validator must boot on edge-first config and refuse bad config."""
+    import importlib
+    from src.edge_floors import validate_edge_floors
+
+    # Current committed config is edge-first → must pass (no SystemExit).
+    validate_edge_floors()
+
+    # Each floor violation must raise SystemExit. Test one representative per floor
+    # by temporarily mutating config in memory.
+    import src.config as _c
+    violations = {
+        "MIN_RR_FLOOR": 0.8,
+        "COST_MAX_FRACTION_OF_TARGET": 0.40,
+        "MAX_TRADES_PER_SYMBOL": 4,
+        "MAX_CURRENCY_EXPOSURE": 3,
+        "SCALPER_MIN_TICK_VELOCITY": 1.0,
+        "EXPLORATION_ENABLED": True,
+        "TQ_BASE_MIN": 0.45,
+    }
+    for attr, bad in violations.items():
+        saved = getattr(_c, attr)
+        setattr(_c, attr, bad)
+        try:
+            raised = False
+            try:
+                validate_edge_floors()
+            except SystemExit:
+                raised = True
+            assert raised, f"{attr}={bad} should have tripped an edge floor"
+        finally:
+            setattr(_c, attr, saved)
+
+
+# ── 13. Deterministic trade-quality floor (Phase 0.5) ────────────────────────────
+
+def test_tq_passes_minimum_deterministic():
+    """passes_minimum() is a single static floor, with NO coupling to any other
+    score. The same TQ score yields the same verdict regardless of context."""
+    from src.strategy.trade_quality import TradeQuality
+
+    def _tq(score: float) -> TradeQuality:
+        return TradeQuality(score=score, momentum_score=0.0, structural_score=0.0,
+                            alignment_score=0.0, condition_score=0.0,
+                            at_key_level=False, atr=0.0001, detail="")
+
+    floor = cfg.TQ_BASE_MIN
+    # Just below the floor fails; at/above passes — deterministically.
+    assert _tq(floor - 0.001).passes_minimum() is False
+    assert _tq(floor).passes_minimum() is True
+    assert _tq(floor + 0.10).passes_minimum() is True
+    # Explicit base_min override is honoured.
+    assert _tq(0.55).passes_minimum(base_min=0.50) is True
+    assert _tq(0.55).passes_minimum(base_min=0.60) is False
+    # Determinism: verdict does not depend on call order / external state.
+    assert _tq(floor).passes_minimum() == _tq(floor).passes_minimum()
 
 
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────

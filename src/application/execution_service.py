@@ -1054,6 +1054,18 @@ class ExecutionService:
             action, state.symbol, ticket, money, self._currency, source,
             pips_equiv, state.grade,
         )
+
+        # Arm re-entry cooldown for any loss close, including broker-side SL hits.
+        # Prevents whipsaw churn: stopped out → bar closes with opposing tick
+        # pressure → re-enter immediately → stopped out again.
+        if money < 0:
+            self._arm_reversal_cooldown(state.symbol)
+            logger.debug(
+                "COOLDOWN ARMED [%s] after %s loss — blocking re-entry for %ss",
+                state.symbol, action,
+                getattr(config, "REVERSAL_REENTRY_COOLDOWN_SEC", 120),
+            )
+
         return money
 
     def _estimate_money_pnl(self, state: "_OpenTradeState") -> float:

@@ -140,9 +140,9 @@ class EntryContextScorer:
         Returns an EntryContext with effective thresholds and full reasoning.
         """
         ctx = EntryContext(
-            effective_align_threshold  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.43),
-            effective_tick_threshold   = getattr(config, "SCALPER_MIN_TICK_SCORE",      0.15),
-            effective_candle_threshold = getattr(config, "SCALPER_MIN_CANDLE_SCORE",    0.10),
+            effective_align_threshold  = getattr(config, "SCALPER_MIN_ALIGNMENT_SCORE", 0.55),
+            effective_tick_threshold   = getattr(config, "SCALPER_MIN_TICK_SCORE",      0.50),
+            effective_candle_threshold = getattr(config, "SCALPER_MIN_CANDLE_SCORE",    0.30),
         )
         reason = ctx.reasoning
 

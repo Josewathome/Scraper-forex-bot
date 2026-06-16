@@ -61,14 +61,20 @@ class TradeQuality:
     atr:               float   # ATR used for normalization
     detail:            str     # human-readable summary
 
-    def passes_minimum(self, signal_confidence: float, base_min: float = 0.45) -> bool:
-        """Dynamic minimum: weaker signals require higher-quality entries."""
-        # Reduce the minimum floor as confidence increases
-        # confidence 1.0 → min = base_min - 0.05
-        # confidence 0.6 → min = base_min + 0.04
-        dynamic_min = base_min + (0.70 - signal_confidence) * 0.10
-        dynamic_min = max(0.35, min(0.65, dynamic_min))
-        return self.score >= dynamic_min
+    def passes_minimum(self, base_min: float | None = None) -> bool:
+        """
+        Deterministic quality floor: composite must clear a single static
+        threshold. No coupling to other scores — the floor means exactly one
+        thing and a rejection is explainable from this number alone.
+
+        (Phase 0.5: removed the dynamic confidence-coupled minimum. It varied
+        the floor by only ±0.015 around TQ_BASE_MIN while making "why did GATE7
+        reject" depend on a second score. Determinism > negligible adaptation.)
+        """
+        if base_min is None:
+            import src.config as _cfg
+            base_min = getattr(_cfg, "TQ_BASE_MIN", 0.60)
+        return self.score >= base_min
 
 
 def compute_trade_quality(
