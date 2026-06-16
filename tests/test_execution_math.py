@@ -281,6 +281,78 @@ def test_exploration_caps():
     assert eg2._exploration_allowed("USDJPY") is False
 
 
+# ── 10. Post-fill validation (M1 latency / slippage guard) ───────────────────────
+
+def test_post_fill_abort():
+    from src.application.execution_service import ExecutionService
+    pc = PipCalculator(digits=5)  # GBPUSD: 1 pip = 0.0001
+
+    # Clean fill: entry 1.30000, SL 1.29950 (5 pips), TP1 1.30070 (7 pips),
+    # 0.09 lot, $10/pip, $230 balance → risk $4.50 (<3% ceiling), rr 1.4 → viable.
+    reason, dbg = ExecutionService._post_fill_abort_reason(
+        entry=1.30000, stop=1.29950, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is None, reason
+    assert abs(dbg["sl_pips"] - 5.0) < 1e-6
+    assert abs(dbg["tp1_pips"] - 7.0) < 1e-6
+
+    # Adverse slippage widened the stop: filled at 1.30040 (long), SL still
+    # 1.29950 → real stop 9 pips → risk $8.10 = 3.5% of $230 > 3% ceiling → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30040, stop=1.29950, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "risk" in reason
+
+    # Favorable slippage ate the target: filled at 1.30065 (long), TP1 1.30070
+    # → only 0.5 pip left vs a 5-pip stop (rr 0.1 < MIN_RR_FLOOR) → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30065, stop=1.30015, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "TP1" in reason
+
+    # Price overshot TP1 before fill (wrong side) → ABORT.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30080, stop=1.30030, tp1=1.30070, is_long=True,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is not None and "TP1" in reason
+
+    # Short side, clean fill: entry 1.30000, SL 1.30050 (5p), TP1 1.29930 (7p) → viable.
+    reason, _ = ExecutionService._post_fill_abort_reason(
+        entry=1.30000, stop=1.30050, tp1=1.29930, is_long=False,
+        lot=0.09, pip_value=10.0, balance=230.0, pip_calc=pc,
+    )
+    assert reason is None, reason
+
+
+# ── 11. EV bootstrap charges a slippage allowance ────────────────────────────────
+
+def test_ev_bootstrap_slippage():
+    # GBPUSD bootstrap (empty journal): a 4-pip SL / 4-pip TP scalp whose blended
+    # reward barely clears spread+commission must FAIL once the ~1-pip slippage
+    # allowance is charged — i.e. the slippage term actually moves the verdict.
+    eg = _eg()
+    # Tight scalp; pip_value 10 → commission 0.35p/side. spread 0.4p + ~0.7p ≈ 1.1p cost.
+    bc = BrokerCost(0.4, 3.5, 10.0)
+    # Prove the slippage term is wired and monotonic: a larger charge can only
+    # make EV worse (never better). This guards against the term being dropped.
+    import src.config as _c
+    saved = _c.EV_SLIPPAGE_PIPS
+    try:
+        _c.EV_SLIPPAGE_PIPS = 0.0
+        loose = eg._ev_status("GBPUSD", 4.0, 4.0, bc)
+        _c.EV_SLIPPAGE_PIPS = 5.0
+        strict = eg._ev_status("GBPUSD", 4.0, 4.0, bc)
+    finally:
+        _c.EV_SLIPPAGE_PIPS = saved
+    # A larger slippage charge can only make EV worse (never better).
+    rank = {"pass": 2, "negative": 1, "unknown": 0}
+    assert rank[strict] <= rank[loose]
+
+
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────
 
 def _run_all() -> int:

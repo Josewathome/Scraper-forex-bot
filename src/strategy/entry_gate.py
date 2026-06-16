@@ -636,6 +636,11 @@ class EntryGate:
                 source   = f"rolling(n={perf['samples']})"
             else:
                 win_rate = max(0.0, win_rate - getattr(config, "ASSUMED_WIN_RATE_HAIRCUT", 0.05))
+                # Bootstrap only: charge a slippage allowance so the gate models the
+                # REAL ~56% break-even (spread+commission alone imply ~50%, which lets
+                # through trades that only win under perfect fills). Rolling broker-truth
+                # avg_win/avg_loss already include realised slippage — never add it there.
+                cost += getattr(config, "EV_SLIPPAGE_PIPS", 1.0)
 
             ev = (win_rate * avg_win) - ((1.0 - win_rate) * avg_loss) - cost
             if ev < ev_min:

@@ -442,6 +442,15 @@ ASSUMED_WIN_RATE_HAIRCUT: float = float(os.environ.get("ASSUMED_WIN_RATE_HAIRCUT
 EV_MIN_PIPS:             float = float(os.environ.get("EV_MIN_PIPS",             "0.10"))
 EV_ROLLING_WINDOW:       int   = int(os.environ.get("EV_ROLLING_WINDOW",         "50"))
 EV_MIN_SAMPLES:          int   = int(os.environ.get("EV_MIN_SAMPLES",            "30"))
+# Slippage allowance (pips) added to the round-trip cost ONLY in the BOOTSTRAP
+# EV estimate. Round-trip spread+commission alone implies a ~50% break-even on a
+# 7/5-pip scalp, but real fills slip ~1 pip on entry + the market stop on exit,
+# pushing the true break-even to ~56%. Charging this allowance up front stops the
+# gate greenlighting trades that are only profitable under perfect execution.
+# NOT added once rolling broker-truth win/loss exist — those already include
+# realised slippage (double-counting would over-reject). FX-calibrated (1 pip);
+# negligible for gold's $0.01 pips (gold is disabled by default anyway).
+EV_SLIPPAGE_PIPS:        float = float(os.environ.get("EV_SLIPPAGE_PIPS",        "1.0"))
 # Expected exit R used to model the tiered TP plan in the EV gate's avg_win.
 # Conservative default for the runner = TP1 RR (assume the runner gives back to TP1).
 RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",          str(SCALPER_TP1_RR)))
@@ -455,7 +464,7 @@ RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",         
 # velocity — still applies). These gather real outcomes so the rolling EV can
 # take over. Exploration trades are forced to the lowest risk grade.
 EXPLORATION_ENABLED:        bool = os.environ.get("EXPLORATION_ENABLED", "true").lower() == "true"
-EXPLORATION_TRADES_PER_DAY: int  = int(os.environ.get("EXPLORATION_TRADES_PER_DAY", "8"))  # per symbol
+EXPLORATION_TRADES_PER_DAY: int  = int(os.environ.get("EXPLORATION_TRADES_PER_DAY", "3"))  # per symbol — lowered 8→3: at 8×4 symbols = 32 EV-bypassed probes/day, a systematic bootstrap drain. 3 still gathers samples without bleeding the account.
 
 # ── Reversal re-entry cooldown ────────────────────────────────────
 # After a reversal/structural-reversal exit, block ALL new entries on that
