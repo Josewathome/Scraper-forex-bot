@@ -184,10 +184,13 @@ def test_structure_aware_tp():
     assert abs(pc5.price_to_pips(abs(tp2 - px)) - 7.0) < 0.01    # tp2 also capped to structure
     assert abs(rr - 0.7) < 1e-6
 
-    # (c) ATR horizon cap (M5 ATR 0.0006 = 6 pips × 1.5 = 9-pip cap) < nominal 15.
+    # (c) ATR horizon cap: with a small ATR the cap binds below nominal 15.
+    #     Expected = min(15, atr_pips × TP1_ATR_CAP_MULT) — robust to tuning.
+    atr_pips = 3.0; m5_atr = pc5.pips_to_price(atr_pips)
+    exp = min(15.0, atr_pips * cfg.TP1_ATR_CAP_MULT)
     tp1, tp2, d1, rr = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0006)
-    assert abs(d1 - 9.0) < 0.01, d1
+        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=m5_atr)
+    assert abs(d1 - exp) < 0.05, (d1, exp)
 
     # (d) Short side mirrors: support below caps the (downward) target.
     sl_s = px + 0.0010
@@ -196,12 +199,23 @@ def test_structure_aware_tp():
     assert tp1 < px and abs(d1 - 7.0) < 0.01
 
     # (e) The day-12 failure: 9.9-pip move, 7.7-pip stop, nominal TP1=11.6 (missed).
-    #     A 1.5×ATR cap with ATR≈6 pips pulls TP1 to ~9 pips → now reachable.
+    #     The ATR cap pulls TP1 in to a reachable distance < the nominal 11.6.
     sl_d = px - 0.00077
+    atr_pips = 4.0; m5_atr = pc5.pips_to_price(atr_pips)
     _, _, d1_capped, _ = EntryGate._compute_targets(
-        _Sig("USDJPY" if False else "GBPUSD", Direction.BULLISH), px, sl_d, pc5, m5_atr=0.0006)
+        _Sig("GBPUSD", Direction.BULLISH), px, sl_d, pc5, m5_atr=m5_atr)
     nominal = 7.7 * 1.5
-    assert d1_capped < nominal and abs(d1_capped - 9.0) < 0.01
+    assert d1_capped < nominal and abs(d1_capped - min(nominal, atr_pips * cfg.TP1_ATR_CAP_MULT)) < 0.05
+
+
+# ── 5c. Gold disabled by default on small accounts ───────────────────────────────
+
+def test_gold_disabled_by_default():
+    # XAUUSD risks ~$4–5/trade (≈3% of a ~$140 account) — too large; disabled
+    # by default and excluded from the live symbol set.
+    assert "XAUUSD" in cfg.DISABLED_SYMBOLS
+    assert "XAUUSD" not in cfg.SYMBOLS
+    assert "GBPUSD" in cfg.SYMBOLS and "USDJPY" in cfg.SYMBOLS
 
 
 # ── 6. FX stop sizing is UNCHANGED (swing-first) ─────────────────────────────────

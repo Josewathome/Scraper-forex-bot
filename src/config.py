@@ -38,7 +38,17 @@ JWT_ACCESS_EXPIRES_MINUTES  = int(os.environ.get("JWT_ACCESS_EXPIRES_MINUTES", "
 JWT_REFRESH_EXPIRES_DAYS    = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS", "7"))
 
 # ── Symbols to Trade ───────────────────────────────────────────────
-SYMBOLS = ["GBPUSD", "XAUUSD", "USDJPY", "AUDUSD", "USDCHF"]
+_ALL_SYMBOLS = ["GBPUSD", "XAUUSD", "USDJPY", "AUDUSD", "USDCHF"]
+# Symbols defined but NOT traded. XAUUSD is disabled by default: on a small
+# (~$140) account its structural stop (~$4–5) consumes the entire per-trade risk
+# budget (≈3%), making it far too large a bet — day-15 data showed 2 gold trades
+# = the whole day's loss (−$5.15) while FX was green, and the gold losses tripped
+# the daily-drawdown breaker which then blocked FX entries too. Re-enable once
+# capital ≥ ~$1,000 by setting DISABLED_SYMBOLS="" in .env.
+DISABLED_SYMBOLS: set = {
+    s.strip().upper() for s in os.environ.get("DISABLED_SYMBOLS", "XAUUSD").split(",") if s.strip()
+}
+SYMBOLS = [s for s in _ALL_SYMBOLS if s not in DISABLED_SYMBOLS]
 
 # ── Broker Time Zone ───────────────────────────────────────────────
 BROKER_UTC_OFFSET_HOURS: int = 2
@@ -388,14 +398,21 @@ TP2_RR_RATIO: float = SCALPER_TP2_RR
 # When enabled, TP1/TP2 are pulled in to the NEAREST reachable target:
 #   min( fixed RR , next opposing swing − buffer , ATR horizon cap ).
 TP_STRUCTURE_AWARE: bool = os.environ.get("TP_STRUCTURE_AWARE", "true").lower() == "true"
-# Cap TP at this multiple of the M5 ATR — a realistic scalp horizon.
-TP1_ATR_CAP_MULT: float = float(os.environ.get("TP1_ATR_CAP_MULT", "1.5"))
+# Cap TP at this multiple of the M5 ATR — a realistic scalp horizon. Raised from
+# 1.5 → 2.5: at 1.5 the ATR cap pulled TP1 to ~4–5 pips while structural stops
+# were 6–8 pips (reachable R:R 0.5–0.7), which the Gate-9 floor then rejected —
+# day-15 lost ~41 valid FX scalps this way. 2.5 still trims the day-12
+# "1.5×wide-stop = unreachable" targets without nuking frequency.
+TP1_ATR_CAP_MULT: float = float(os.environ.get("TP1_ATR_CAP_MULT", "2.5"))
 # Exit this many pips BEFORE the opposing swing (don't sit at the level where
 # liquidity rests / price reverses). Per-symbol pip units (gold pip = $0.01).
 TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.0"))
-# Minimum reward:risk accepted AFTER capping. A reachable target below this is
-# not worth the risk → trade rejected. (MIN_RR stays the nominal/aspirational.)
-MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.0"))
+# Minimum reward:risk accepted AFTER capping. Lowered 1.0 → 0.8: FX scalps
+# naturally have stops a bit wider than the realistic move, so a hard 1.0 floor
+# rejected most of them. The EV gate (which uses the REAL rolling win rate) is
+# the true arbiter of whether a sub-1R scalp is worth taking; this floor only
+# blocks genuinely poor reward:risk. (MIN_RR stays the nominal/aspirational.)
+MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "0.8"))
 
 # ── Entry gate strategy flag ──────────────────────────────────────
 # SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
