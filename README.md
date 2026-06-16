@@ -109,12 +109,15 @@ they are implemented and unit-tested in the live execution path.
   and its **TP is set to TP2** (the final target / hard backstop). The software
   manages the TP1 partial, profit-lock and structural trailing *before* TP2, so
   the tiered exit is not pre-empted by the broker closing the whole position at TP1.
-- **Structure-aware targets (not a blind 1.5R).** TP1/TP2 are the *nearest
-  reachable* target — `min(fixed RR, next opposing swing − buffer, ATR horizon
-  cap)` — so the target isn't placed past where price actually turns (day-12
-  evidence: only 2/13 hit TP1 while 6/13 reached ≥5 pips). The cost/EV gates
-  evaluate this real target, and a trade whose only reachable target is below
-  `MIN_RR_FLOOR` is rejected. Disable with `TP_STRUCTURE_AWARE=false`.
+- **Fully structure-driven targets (not a blind 1.5R, not an ATR guess).** TP1
+  and TP2 are placed at the actual market-structure levels carried on the signal
+  (`tp_levels` — the opposing swing highs/lows where price genuinely reacts):
+  TP1 = nearest opposing swing − buffer, TP2 = the next swing beyond it (else
+  exit fully at TP1). Only when **no** structural level exists beyond price
+  (e.g. a breakout to new highs) does it fall back to fixed RR (ATR-capped).
+  The cost/EV gates evaluate this real target, and a trade whose nearest real
+  target is below `MIN_RR_FLOOR` is rejected (no room → no trade). Disable with
+  `TP_STRUCTURE_AWARE=false`.
 - **Broker-truth analytics.** Every close is reconciled against MT5 deal history
   (realised net P&L, including swap/commission). Win/loss is classified by the
   **sign of realised money** — never reconstructed from maximum-favourable

@@ -34,12 +34,13 @@ from src.infrastructure.trade_journal import TradeJournal
 # ── Lightweight fakes ───────────────────────────────────────────────────────────
 
 class _Sig:
-    """Duck-typed StrategySignal for _compute_sl (only uses these attributes)."""
-    def __init__(self, symbol, direction, swing_lo=None, swing_hi=None):
+    """Duck-typed StrategySignal for _compute_sl / _compute_targets."""
+    def __init__(self, symbol, direction, swing_lo=None, swing_hi=None, tp_levels=None):
         self.symbol = symbol
         self.direction = direction
         self.last_swing_support = swing_lo
         self.last_swing_resistance = swing_hi
+        self.tp_levels = tp_levels or []
 
 
 class _FakeTR:
@@ -170,42 +171,39 @@ def test_gold_atr_adaptive_sl():
 def test_structure_aware_tp():
     pc5 = PipCalculator(digits=5)
     px = 1.30000
-    sl = px - 0.0010                      # 10-pip stop → nominal TP1 = 15 pips
+    sl = px - 0.0010                      # 10-pip stop
 
-    # (a) No barrier, no ATR → behaves as original 1.5R / 2.0R.
+    buf = cfg.TP_STRUCT_BUFFER_PIPS       # pips
+
+    # (a) No structural levels → fallback to fixed 1.5R / 2.0R (no ATR).
     tp1, tp2, d1, rr = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=0.0)
+        _Sig("GBPUSD", Direction.BULLISH, tp_levels=[]), px, sl, pc5, m5_atr=0.0)
     assert abs(d1 - 15.0) < 0.01 and abs(rr - 1.5) < 1e-6
 
-    # (b) Resistance at +8 pips → TP1 capped to ~7 pips (8 − 1-pip buffer); rr<1.5.
-    sig = _Sig("GBPUSD", Direction.BULLISH, swing_hi=px + 0.0008)
+    # (b) One resistance at +8 pips → TP1 = 8 − buffer; TP2 == TP1 (exit at level).
+    sig = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px + 0.0008])
     tp1, tp2, d1, rr = EntryGate._compute_targets(sig, px, sl, pc5, m5_atr=0.0)
-    assert abs(d1 - 7.0) < 0.01, d1
-    assert abs(pc5.price_to_pips(abs(tp2 - px)) - 7.0) < 0.01    # tp2 also capped to structure
-    assert abs(rr - 0.7) < 1e-6
+    assert abs(d1 - (8.0 - buf)) < 0.01, d1
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (8.0 - buf)) < 0.01
 
-    # (c) ATR horizon cap: with a small ATR the cap binds below nominal 15.
-    #     Expected = min(15, atr_pips × TP1_ATR_CAP_MULT) — robust to tuning.
-    atr_pips = 3.0; m5_atr = pc5.pips_to_price(atr_pips)
-    exp = min(15.0, atr_pips * cfg.TP1_ATR_CAP_MULT)
-    tp1, tp2, d1, rr = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl, pc5, m5_atr=m5_atr)
-    assert abs(d1 - exp) < 0.05, (d1, exp)
+    # (c) Two resistances (+8, +14) → TP1 at first, TP2 at second (the ladder).
+    sig2 = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px + 0.0008, px + 0.0014])
+    tp1, tp2, d1, rr = EntryGate._compute_targets(sig2, px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - (8.0 - buf)) < 0.01
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (14.0 - buf)) < 0.01
 
-    # (d) Short side mirrors: support below caps the (downward) target.
+    # (d) Short side mirrors: nearest support below = TP1.
     sl_s = px + 0.0010
-    sig_s = _Sig("GBPUSD", Direction.BEARISH, swing_lo=px - 0.0008)
+    sig_s = _Sig("GBPUSD", Direction.BEARISH, tp_levels=[px - 0.0008, px - 0.0013])
     tp1, tp2, d1, rr = EntryGate._compute_targets(sig_s, px, sl_s, pc5, m5_atr=0.0)
-    assert tp1 < px and abs(d1 - 7.0) < 0.01
+    assert tp1 < px and abs(d1 - (8.0 - buf)) < 0.01
+    assert abs(pc5.price_to_pips(abs(tp2 - px)) - (13.0 - buf)) < 0.01
 
-    # (e) The day-12 failure: 9.9-pip move, 7.7-pip stop, nominal TP1=11.6 (missed).
-    #     The ATR cap pulls TP1 in to a reachable distance < the nominal 11.6.
-    sl_d = px - 0.00077
-    atr_pips = 4.0; m5_atr = pc5.pips_to_price(atr_pips)
-    _, _, d1_capped, _ = EntryGate._compute_targets(
-        _Sig("GBPUSD", Direction.BULLISH), px, sl_d, pc5, m5_atr=m5_atr)
-    nominal = 7.7 * 1.5
-    assert d1_capped < nominal and abs(d1_capped - min(nominal, atr_pips * cfg.TP1_ATR_CAP_MULT)) < 0.05
+    # (e) Levels below price are ignored (only opposing/above used for a long);
+    #     here only an above level qualifies.
+    sig3 = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px - 0.0005, px + 0.0009])
+    _, _, d1, _ = EntryGate._compute_targets(sig3, px, sl, pc5, m5_atr=0.0)
+    assert abs(d1 - (9.0 - buf)) < 0.01
 
 
 # ── 5c. Gold disabled by default on small accounts ───────────────────────────────
