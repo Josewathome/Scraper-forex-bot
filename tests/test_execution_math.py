@@ -383,7 +383,7 @@ def test_edge_floors():
         "COST_MAX_FRACTION_OF_TARGET": 0.40,
         "MAX_TRADES_PER_SYMBOL": 4,
         "MAX_CURRENCY_EXPOSURE": 3,
-        "SCALPER_MIN_TICK_VELOCITY": 1.0,
+        "SCALPER_MIN_TICK_VELOCITY": 0.5,
         "EXPLORATION_ENABLED": True,
         "TQ_BASE_MIN": 0.45,
     }
