@@ -307,7 +307,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.5"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable
+SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.2"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable (1.5→1.2: 1.5 was rejecting ~39% of in-session signals; velocity is a liquidity gate, not an edge gate)
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,

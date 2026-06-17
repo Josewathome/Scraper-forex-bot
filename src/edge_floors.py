@@ -75,14 +75,17 @@ def validate_edge_floors() -> None:
         )
 
     # ── Floor 5: Tick velocity gate ───────────────────────────────────────────
-    # Below 1.5 ticks/sec the spread is wide relative to the market move and
-    # fills are unreliable. Momentum entries in dead markets are false signals.
+    # Below 1.0 ticks/sec the market is genuinely dead and fills are unreliable.
+    # (Floor relaxed 1.5→1.0: velocity is a LIQUIDITY gate, not an edge gate.
+    # 1.5 rejected ~39% of in-session signals; the per-trade edge is protected by
+    # MIN_RR / cost / EV floors, not by velocity. Default is 1.2; the hard floor
+    # below which we refuse to boot is 1.0 — genuinely dead market.)
     tick_vel = getattr(cfg, "SCALPER_MIN_TICK_VELOCITY", None)
-    if tick_vel is None or tick_vel < 1.5:
+    if tick_vel is None or tick_vel < 1.0:
         failures.append(
-            f"SCALPER_MIN_TICK_VELOCITY={tick_vel} — must be ≥ 1.5. "
-            "Below 1.5 ticks/sec, fills are unreliable and spread dominates. "
-            "Set SCALPER_MIN_TICK_VELOCITY=1.5 in .env or config."
+            f"SCALPER_MIN_TICK_VELOCITY={tick_vel} — must be ≥ 1.0. "
+            "Below 1.0 ticks/sec the market is dead and fills are unreliable. "
+            "Set SCALPER_MIN_TICK_VELOCITY=1.2 in .env or config."
         )
 
     # ── Floor 6: Exploration disabled ────────────────────────────────────────
