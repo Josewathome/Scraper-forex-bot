@@ -457,6 +457,77 @@ def test_net_rr_after_cost():
     assert net_rr is None
 
 
+# ── 15. Post-BOS/CHoCH retest state machine (Phase 3) ────────────────────────────
+
+def test_retest_state_machine():
+    from src.strategy.retest_state_machine import (
+        RetestStateMachine, RetestState, RetestDecision,
+    )
+    from src.domain.entities import Direction
+
+    ATR = 0.0010          # 10 pips on a 5-digit pair
+    LEVEL = 1.30000
+    BIG_BODY = 0.0012     # ≥ 1.0×ATR → passes displacement
+    SMALL_BODY = 0.0003   # < 1.0×ATR → fails displacement
+
+    def fresh():
+        return RetestStateMachine(expiry_bars=3, tolerance_atr=0.5, min_displacement_atr=1.0)
+
+    # 1. IDLE + no break → stays IDLE, no entry
+    m = fresh()
+    d = m.observe(symbol="X", is_structure_break=False, bos_level=None, bos_direction=None,
+                  current_price=1.29900, atr=ATR, signal_direction=None, break_body=0.0)
+    assert d == RetestDecision.NO_ENTRY and m.state_of("X") == RetestState.IDLE
+
+    # 2. BOS with displacement → arms WAIT_RETEST (no entry yet)
+    d = m.observe(symbol="X", is_structure_break=True, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=BIG_BODY)
+    assert d == RetestDecision.NO_ENTRY and m.state_of("X") == RetestState.WAIT_RETEST
+
+    # 3. price drifts but not back to level → keep waiting
+    d = m.observe(symbol="X", is_structure_break=False, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30150, atr=ATR, signal_direction=Direction.BULLISH, break_body=0.0)
+    assert d == RetestDecision.NO_ENTRY and m.state_of("X") == RetestState.WAIT_RETEST
+
+    # 4. price RETESTS the level, direction agrees → ENTER, then back to IDLE
+    d = m.observe(symbol="X", is_structure_break=False, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30030, atr=ATR, signal_direction=Direction.BULLISH, break_body=0.0)
+    assert d == RetestDecision.ENTER and m.state_of("X") == RetestState.IDLE
+
+    # 5. displacement filter: small-body BOS is ignored (stays IDLE)
+    m = fresh()
+    d = m.observe(symbol="Y", is_structure_break=True, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=SMALL_BODY)
+    assert d == RetestDecision.NO_ENTRY and m.state_of("Y") == RetestState.IDLE
+
+    # 6. retest touched but direction DISAGREES → hold, no entry
+    m = fresh()
+    m.observe(symbol="Z", is_structure_break=True, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+              current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=BIG_BODY)
+    d = m.observe(symbol="Z", is_structure_break=False, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30000, atr=ATR, signal_direction=Direction.BEARISH, break_body=0.0)
+    assert d == RetestDecision.NO_ENTRY and m.state_of("Z") == RetestState.WAIT_RETEST
+
+    # 7. expiry: armed at bar1 (expires_at=4); bars 2,3 wait; bar4 expires → IDLE
+    m = fresh()
+    m.observe(symbol="E", is_structure_break=True, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+              current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=BIG_BODY)  # bar1
+    for _ in range(2):  # bars 2,3 — price never returns
+        m.observe(symbol="E", is_structure_break=False, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=0.0)
+    assert m.state_of("E") == RetestState.WAIT_RETEST
+    d = m.observe(symbol="E", is_structure_break=False, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+                  current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=0.0)  # bar4
+    assert d == RetestDecision.NO_ENTRY and m.state_of("E") == RetestState.IDLE
+
+    # 8. per-symbol isolation: arming X must not affect W
+    m = fresh()
+    m.observe(symbol="X", is_structure_break=True, bos_level=LEVEL, bos_direction=Direction.BULLISH,
+              current_price=1.30200, atr=ATR, signal_direction=Direction.BULLISH, break_body=BIG_BODY)
+    assert m.state_of("X") == RetestState.WAIT_RETEST
+    assert m.state_of("W") == RetestState.IDLE
+
+
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────
 
 def _run_all() -> int:
