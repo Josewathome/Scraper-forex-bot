@@ -714,13 +714,11 @@ class DashboardServer:
                 try:
                     current_equity = self._balance_fn() or initial_bal
                 except Exception:
-                    all_pnl        = sum(t["pnl"] or 0 for t in self.journal.get_all()
-                                        if t["outcome"] != "OPEN")
-                    current_equity = initial_bal + all_pnl
+                    # BROKER-TRUTH only — total_realized_pnl() excludes legacy
+                    # pip-era rows. Never sum get_all() raw (it counts fictional P&L).
+                    current_equity = initial_bal + self.journal.total_realized_pnl()
             else:
-                all_pnl        = sum(t["pnl"] or 0 for t in self.journal.get_all()
-                                    if t["outcome"] != "OPEN")
-                current_equity = initial_bal + all_pnl
+                current_equity = initial_bal + self.journal.total_realized_pnl()
 
             reset_time = datetime.now(tz=timezone.utc).isoformat()
             history    = _load_balance_history()

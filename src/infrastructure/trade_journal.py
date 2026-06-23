@@ -251,7 +251,41 @@ class TradeJournal:
             return []
         try:
             with open(self.path, encoding="utf-8") as fh:
-                return json.load(fh)
+                trades = json.load(fh)
         except Exception as exc:
             logger.warning("TradeJournal load failed (starting fresh): %s", exc)
             return []
+        return self._migrate_legacy(trades)
+
+    def _migrate_legacy(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        One-time, permanent neutralisation of pip-era records.
+
+        Pre-v2 rows stored `pnl` as PIPS (gold $3.45 → pnl=345), which any reader
+        that naively sums `pnl` would mis-count as money. `_is_money_record` already
+        excludes them, but a stale file keeps poisoning callers that forget to use
+        it (e.g. dashboard client-side sums). Here we move each legacy `pnl` to
+        `legacy_pips` and set `pnl=None`, so the fictional value is gone from the
+        money field for good and EVERY reader — guarded or not — sees no profit.
+        """
+        migrated = 0
+        for t in trades:
+            is_closed = t.get("outcome") not in (None, "OPEN")
+            is_v2     = int(t.get("schema", 1)) >= _SCHEMA
+            if is_closed and not is_v2 and t.get("pnl") is not None:
+                t["legacy_pips"] = t.pop("pnl")
+                t["pnl"] = None
+                migrated += 1
+        if migrated:
+            logger.warning(
+                "TradeJournal: neutralised %d legacy pip-era record(s) — their `pnl` "
+                "was PIPS not money and is now archived to `legacy_pips` (pnl=None). "
+                "Only broker-truth v%d records count toward P&L.",
+                migrated, _SCHEMA,
+            )
+            self._trades = trades
+            try:
+                self._save()   # persist the cleaned file once
+            except Exception as exc:
+                logger.warning("TradeJournal: could not persist migration: %s", exc)
+        return trades

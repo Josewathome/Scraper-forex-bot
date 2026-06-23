@@ -528,6 +528,47 @@ def test_retest_state_machine():
     assert m.state_of("W") == RetestState.IDLE
 
 
+# ── 16. Journal legacy pip-era migration (data integrity) ────────────────────────
+
+def test_journal_legacy_migration():
+    """Legacy pip-era rows (pnl=pips, no schema) must be neutralised on load so no
+    reader can ever sum their fictional P&L; only broker-truth v2 rows count."""
+    import json, os, tempfile
+    from src.infrastructure.trade_journal import TradeJournal
+
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        # One poisonous legacy gold row (pnl=345 PIPS, no schema) + one real v2 row.
+        seed = [
+            {"ticket": 1, "symbol": "XAUUSD", "direction": "bullish",
+             "outcome": "win", "pnl": 345.70},                       # legacy: pips-as-pnl
+            {"schema": 2, "ticket": 2, "symbol": "USDJPY", "direction": "bullish",
+             "outcome": "win", "pnl": 0.90, "pips": 9.0},            # broker-truth money
+            {"schema": 2, "ticket": 3, "symbol": "USDJPY", "direction": "bearish",
+             "outcome": "loss", "pnl": -1.08, "pips": -10.8},        # broker-truth money
+        ]
+        with open(path, "w") as fh:
+            json.dump(seed, fh)
+
+        j = TradeJournal(path=path)
+
+        # Legacy row neutralised: pnl gone, archived to legacy_pips.
+        rows = {t["ticket"]: t for t in j.get_all()}
+        assert rows[1]["pnl"] is None
+        assert rows[1]["legacy_pips"] == 345.70
+
+        # Money total counts ONLY the two v2 rows: 0.90 - 1.08 = -0.18 (NOT +345).
+        assert abs(j.total_realized_pnl() - (-0.18)) < 1e-9
+
+        # Migration persisted to disk (pnl null on the legacy row).
+        with open(path) as fh:
+            on_disk = {t["ticket"]: t for t in json.load(fh)}
+        assert on_disk[1]["pnl"] is None and on_disk[1]["legacy_pips"] == 345.70
+    finally:
+        os.unlink(path)
+
+
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────
 
 def _run_all() -> int:
