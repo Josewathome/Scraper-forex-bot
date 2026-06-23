@@ -364,6 +364,28 @@ class EntryGate:
             )
             return None
 
+        # ── Gate 9b: NET-of-cost reward:risk (the real viability test) ──
+        # The target must net more profit than the trade risks AFTER paying the
+        # round-trip cost. This is what rejects sub-pip structural targets that
+        # look fine on gross R:R but are net-negative once spread+commission is
+        # charged. See config.MIN_NET_RR_AFTER_COST.
+        net_rr_floor = getattr(config, "MIN_NET_RR_AFTER_COST", 1.5)
+        net_rr, net_reward_pips, cost_pips = self._net_rr_after_cost(
+            tp1_dist_pips, sl_dist_pips, broker_cost,
+        )
+        if net_rr is None:
+            logger.info("ENTRY_GATE_BLOCK [%s] net_rr undeterminable (cost) — rejecting", sym)
+            return None
+        if net_rr < net_rr_floor - 1e-6:
+            logger.info(
+                "ENTRY_GATE_BLOCK [%s] net_rr_below_minimum: net_rr=%.2f < %.2f | "
+                "tp1=%.1f − cost=%.1f = net %.1f pips vs risk %.1f pips "
+                "(target must net ≥ %.2f× the risk after cost)",
+                sym, net_rr, net_rr_floor,
+                tp1_dist_pips, cost_pips, net_reward_pips, sl_dist_pips, net_rr_floor,
+            )
+            return None
+
         # ── Build TradeSignal ──────────────────────────────────────
         # Broker take-profit is set to TP2 (final target) so the software-managed
         # TP1 partial fires FIRST and the tiered exit / trailing actually works.
@@ -563,6 +585,32 @@ class EntryGate:
         except Exception as exc:
             logger.error("Cost gate failed for %s: %s — rejecting (fail closed)", symbol, exc)
             return False
+
+    @staticmethod
+    def _net_rr_after_cost(tp1_dist_pips: float, sl_dist_pips: float, broker_cost: "BrokerCost"):
+        """
+        Net-of-cost reward:risk. Pure + unit-testable.
+
+        net_reward_pips = tp1_dist_pips − round_trip_cost_pips
+        net_rr          = net_reward_pips / sl_dist_pips
+
+        Because pip_value×lot cancels, this pip ratio equals the money ratio
+        (net profit if TP hit) / (risk). Returns (net_rr, net_reward_pips,
+        cost_pips); net_rr is None if cost is unknown or SL distance is zero
+        (caller fails closed). net_rr can be negative when cost exceeds the
+        target — that is exactly the sub-pip-target case we want to reject.
+        """
+        try:
+            cost_pips = broker_cost.round_trip_cost_pips()
+        except Exception:
+            return None, 0.0, float("inf")
+        if cost_pips == float("inf") or not (cost_pips == cost_pips):  # inf or NaN
+            return None, 0.0, float("inf")
+        if sl_dist_pips <= 0:
+            return None, 0.0, cost_pips
+        net_reward_pips = tp1_dist_pips - cost_pips
+        net_rr = net_reward_pips / sl_dist_pips
+        return net_rr, net_reward_pips, cost_pips
 
     @staticmethod
     def _blended_win_pips(sl_dist_pips: float) -> float:
