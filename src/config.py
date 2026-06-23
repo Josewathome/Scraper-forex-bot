@@ -419,6 +419,20 @@ TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.
 # blocks genuinely poor reward:risk. (MIN_RR stays the nominal/aspirational.)
 MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.5"))
 
+# ── Net-of-cost reward:risk floor (the REAL viability test) ───────────────────
+# A trade must target meaningfully MORE profit than it risks, AFTER paying the
+# round-trip cost (spread + commission). Computed in money terms:
+#     net_profit_if_TP_hit = (TP1_distance − round_trip_cost) × pip_value × lot
+#     risk                 =  SL_distance × pip_value × lot
+#     require net_profit ≥ MIN_NET_RR_AFTER_COST × risk
+# Because pip_value×lot cancels, this is enforced as a pip ratio:
+#     (tp1_pips − cost_pips) / sl_pips ≥ MIN_NET_RR_AFTER_COST
+# Example: risk $5 → the target must net ≥ $7.50 AFTER cost (1.5×).
+# This is what kills sub-pip structural targets: a 0.15-pip target against a
+# 1.2-pip cost is net-negative and can never clear the floor. MIN_RR_FLOOR above
+# is the GROSS (pre-cost) pip floor; this is the stricter, cost-aware money floor.
+MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.5"))
+
 # ── Entry gate strategy flag ──────────────────────────────────────
 # SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
 # places NO trades until STRATEGY_GATE_ENABLED=true is set explicitly in .env.

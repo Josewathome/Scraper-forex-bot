@@ -425,6 +425,38 @@ def test_tq_passes_minimum_deterministic():
     assert _tq(floor).passes_minimum() == _tq(floor).passes_minimum()
 
 
+# ── 14. Net-of-cost reward:risk floor ────────────────────────────────────────────
+
+def test_net_rr_after_cost():
+    """The target must net >= MIN_NET_RR_AFTER_COST x the risk AFTER round-trip cost.
+    This is what rejects sub-pip structural targets that pass gross R:R."""
+    from src.strategy.entry_gate import EntryGate
+    bc = BrokerCost(0.5, 3.5, 10.0)        # round-trip = 1.2 pips
+    assert abs(bc.round_trip_cost_pips() - 1.2) < 1e-9
+
+    # Clean: tp1=10, sl=4, cost=1.2 -> net 8.8 / 4 = 2.2 -> well above 1.5
+    net_rr, net_rew, cost = EntryGate._net_rr_after_cost(10.0, 4.0, bc)
+    assert abs(cost - 1.2) < 1e-9
+    assert abs(net_rew - 8.8) < 1e-9
+    assert net_rr > 1.5
+
+    # Sub-pip structural target (the June-22 bug): tp1=0.15, sl=4, cost=1.2
+    # -> net reward NEGATIVE -> net_rr < 0 -> must be rejected by the 1.5 floor.
+    net_rr, net_rew, _ = EntryGate._net_rr_after_cost(0.15, 4.0, bc)
+    assert net_rew < 0 and net_rr < 0
+
+    # Exactly at the 1.5 floor: net reward = 1.5*sl = 6 -> tp1 = 6 + cost(1.2) = 7.2
+    net_rr, _, _ = EntryGate._net_rr_after_cost(7.2, 4.0, bc)
+    assert abs(net_rr - 1.5) < 1e-9
+
+    # Cost unknown (commission but no pip value) -> None (fail closed)
+    net_rr, _, _ = EntryGate._net_rr_after_cost(10.0, 4.0, BrokerCost(0.5, 3.5, 0.0))
+    assert net_rr is None
+    # Zero SL distance -> None
+    net_rr, _, _ = EntryGate._net_rr_after_cost(10.0, 0.0, bc)
+    assert net_rr is None
+
+
 # ── Standalone runner (no pytest needed) ────────────────────────────────────────
 
 def _run_all() -> int:
