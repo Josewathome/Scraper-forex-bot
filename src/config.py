@@ -433,6 +433,30 @@ MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.5"))
 # is the GROSS (pre-cost) pip floor; this is the stricter, cost-aware money floor.
 MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.5"))
 
+# ── Phase 3: Post-BOS/CHoCH retest entry state machine ────────────
+# When enabled, the strategy no longer fires on every M1 momentum signal. Instead
+# it waits for a Break of Structure / Change of Character, then for price to
+# RETRACE back to the broken level (the retest) before allowing an entry. This
+# yields a structural entry with a natural stop and a target large enough to clear
+# cost (the June-22 finding: M1 momentum entries produced sub-pip targets).
+#
+# SAFE DEFAULT: false — the system behaves exactly as before. Flip to true only
+# after shadow-observing the RETEST log lines. Feature-flagged + fully isolated:
+# a per-symbol IDLE → WAIT_RETEST → ENTER machine that only gates WHEN a signal
+# may be born, never how it is shaped/sized/executed.
+RETEST_STATE_MACHINE_ENABLED: bool = os.environ.get("RETEST_STATE_MACHINE_ENABLED", "false").lower() == "true"
+# Bars to wait for the retest before abandoning the setup.
+RETEST_EXPIRY_BARS:        int   = int(os.environ.get("RETEST_EXPIRY_BARS", "5"))
+# How close to the broken level counts as a retest, as a fraction of M1 ATR.
+RETEST_TOLERANCE_ATR:      float = float(os.environ.get("RETEST_TOLERANCE_ATR", "0.5"))
+# Breaking-candle body must be ≥ this × ATR to arm a setup (filters micro-BOS
+# noise). Set 0 to disable the displacement filter.
+RETEST_MIN_DISPLACEMENT_ATR: float = float(os.environ.get("RETEST_MIN_DISPLACEMENT_ATR", "1.0"))
+# Shadow mode: when true AND the machine is enabled, log what the machine WOULD
+# do but do NOT actually suppress signals — lets us compare retest vs momentum
+# entries on the same live feed before committing. Default true for safety.
+RETEST_SHADOW_MODE:        bool  = os.environ.get("RETEST_SHADOW_MODE", "true").lower() == "true"
+
 # ── Entry gate strategy flag ──────────────────────────────────────
 # SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
 # places NO trades until STRATEGY_GATE_ENABLED=true is set explicitly in .env.

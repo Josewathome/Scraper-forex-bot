@@ -21,7 +21,8 @@ from src.domain.entities import Candle, Direction, Timeframe
 from src.domain.value_objects import PipCalculator
 from src.strategy.candle_analyzer import CandleProgressResult, LiveCandleAnalyzer
 from src.strategy.scalper_alignment import ScalperAlignmentEngine, ScalperAlignmentResult, Regime
-from src.strategy.structure_state import StructureStateManager
+from src.strategy.structure_state import StructureStateManager, StructureState
+from src.strategy.retest_state_machine import RetestDecision
 from src.strategy.tick_engine import SpreadState, TickAnalysisResult, TickAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,14 @@ class StrategyManager:
         from src.strategy.entry_context import EntryContextScorer
         self._entry_ctx = EntryContextScorer()
 
+        # Phase 3: per-symbol post-BOS/CHoCH retest gate (feature-flagged).
+        from src.strategy.retest_state_machine import RetestStateMachine
+        self._retest = RetestStateMachine(
+            expiry_bars          = getattr(config, "RETEST_EXPIRY_BARS", 5),
+            tolerance_atr        = getattr(config, "RETEST_TOLERANCE_ATR", 0.5),
+            min_displacement_atr = getattr(config, "RETEST_MIN_DISPLACEMENT_ATR", 1.0),
+        )
+
         for sym in symbols:
             self._mtf[sym]       = ScalperAlignmentEngine(sym)
             self._structure[sym] = StructureStateManager(sym)
@@ -198,6 +207,34 @@ class StrategyManager:
             alignment.m5_ema,
             alignment.m5_slope,
         )
+
+        # ── Phase 3: post-BOS/CHoCH retest gate (feature-flagged) ────────
+        # Advanced here — BEFORE any gate that can early-return — so the machine
+        # never misses a BOS or drifts its bar counter. When enabled (and not in
+        # shadow mode) it is the FIRST gate: momentum signals are suppressed until
+        # price retests the broken level. In shadow mode it only logs.
+        if getattr(config, "RETEST_STATE_MACHINE_ENABLED", False) and struct is not None:
+            m1_atr = (ScalperAlignmentEngine._candle_atr(m1_candles[-15:])
+                      if len(m1_candles) >= 2 else 0.0)
+            decision = self._retest.observe(
+                symbol             = symbol,
+                is_structure_break = struct.get_state(Timeframe.M1) == StructureState.STRUCTURE_BREAK,
+                bos_level          = struct.get_bos_level(Timeframe.M1),
+                bos_direction      = struct.get_last_bos_direction(Timeframe.M1),
+                current_price      = current_price,
+                atr                = m1_atr,
+                signal_direction   = alignment.direction,
+                break_body         = m1_candles[-1].body_size if m1_candles else 0.0,
+            )
+            if decision != RetestDecision.ENTER:
+                if getattr(config, "RETEST_SHADOW_MODE", True):
+                    logger.info(
+                        "RETEST_SHADOW [%s] machine=%s (would suppress) — momentum signal "
+                        "still allowed through in shadow mode",
+                        symbol, self._retest.state_of(symbol).value,
+                    )
+                else:
+                    return None
 
         # ── Build entry context (pre-tick — uses alignment signals) ──────
         # We need a direction guess for the tick analyzer before the context
