@@ -38,15 +38,12 @@ JWT_ACCESS_EXPIRES_MINUTES  = int(os.environ.get("JWT_ACCESS_EXPIRES_MINUTES", "
 JWT_REFRESH_EXPIRES_DAYS    = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS", "7"))
 
 # ── Symbols to Trade ───────────────────────────────────────────────
-_ALL_SYMBOLS = ["GBPUSD", "XAUUSD", "USDJPY", "AUDUSD", "USDCHF"]
-# Symbols defined but NOT traded. XAUUSD is disabled by default: on a small
-# (~$140) account its structural stop (~$4–5) consumes the entire per-trade risk
-# budget (≈3%), making it far too large a bet — day-15 data showed 2 gold trades
-# = the whole day's loss (−$5.15) while FX was green, and the gold losses tripped
-# the daily-drawdown breaker which then blocked FX entries too. Re-enable once
-# capital ≥ ~$1,000 by setting DISABLED_SYMBOLS="" in .env.
+# Start live trading with a narrow, liquid universe to keep execution consistent.
+# XAUUSD is disabled because its wide stops and cost profile do not fit a small
+# account well; other symbols can be re-enabled after a week of stable behavior.
+_ALL_SYMBOLS = ["GBPUSD", "USDJPY"]
 DISABLED_SYMBOLS: set = {
-    s.strip().upper() for s in os.environ.get("DISABLED_SYMBOLS", "XAUUSD").split(",") if s.strip()
+    s.strip().upper() for s in os.environ.get("DISABLED_SYMBOLS", "XAUUSD,AUDUSD,USDCHF").split(",") if s.strip()
 }
 SYMBOLS = [s for s in _ALL_SYMBOLS if s not in DISABLED_SYMBOLS]
 
@@ -84,20 +81,18 @@ HFM_COMMISSION_USD: dict[str, float] = {
 HFM_COMMISSION_USD_DEFAULT: float = 3.0
 
 # ── Risk Management ────────────────────────────────────────────────
-RISK_PERCENT        = 2.0
+RISK_PERCENT        = 1.0
 COMMISSION_PER_LOT  = 3.0  # USD/lot (per side) — default for major pairs
 MIN_RR              = 1.5
 # Maximum unique symbols that may have open trades simultaneously.
 # A new symbol can only open a trade if active_symbols < MAX_OPEN_SYMBOLS.
 # The final free slot is reserved for A-grade entries.
-MAX_OPEN_SYMBOLS: int = int(os.environ.get("MAX_OPEN_SYMBOLS", "5"))
+MAX_OPEN_SYMBOLS: int = int(os.environ.get("MAX_OPEN_SYMBOLS", "2"))
 
 # Per-symbol trade caps.
-# A/A+ trades: up to MAX_TRADES_PER_SYMBOL_A  (default 3)
-# B/C/D trades: 1 additional slot beyond the A-grade trades (total cap 4)
-# Hard per-symbol ceiling regardless of grade.
-MAX_TRADES_PER_SYMBOL_A:     int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A",   "3"))
-MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "2"))
+# Start with a very low-frequency profile: one open trade per symbol is enough.
+MAX_TRADES_PER_SYMBOL_A:     int = int(os.environ.get("MAX_TRADES_PER_SYMBOL_A",   "1"))
+MAX_TRADES_PER_SYMBOL:       int = int(os.environ.get("MAX_TRADES_PER_SYMBOL",     "1"))
 
 MAX_LOT_SIZE: float = float(os.environ.get("MAX_LOT_SIZE", "10.0"))
 
@@ -125,7 +120,7 @@ MAX_CURRENCY_EXPOSURE: int   = int(os.environ.get("MAX_CURRENCY_EXPOSURE",    "2
 # ── Daily drawdown circuit breaker ────────────────────────────────
 # If equity drops this % below the day's opening equity, all new entries
 # are blocked for the rest of the UTC day. Open trades keep being managed.
-DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "6.0"))
+DAILY_DRAWDOWN_LIMIT_PCT: float = float(os.environ.get("DAILY_DRAWDOWN_LIMIT_PCT", "8.0"))
 
 # ── SL buffer (pips) ─────────────────────────────────────────────
 EXTRA_PIPS_SL_DEFAULT = 3.0
@@ -200,10 +195,9 @@ MONITOR_TRAIL_ATR_BUFFER = 0.5
 # ── TRADE QUALITY SCORING ─────────────────────────────────────────
 TRADE_SCORE_THRESHOLD   = 2
 # Minimum composite TradeQuality score (0.0–1.0) for entry to proceed.
-# 0.60 = requires all four quality components to score above the neutral
-# midpoint on average. Below this composite, the market physics do not
-# support the entry (momentum weak, not at structure, poor regime, etc.).
-TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.60"))
+# 0.50 is still selective while allowing more structurally sound setups to
+# pass than the older 0.60 floor.
+TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.50"))
 
 # ── DYNAMIC POSITION SIZING ───────────────────────────────────────
 # Quality-weighted risk per grade (now wired via MarginManager):
@@ -211,10 +205,10 @@ TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.60"))
 #   A   conf ≥ 0.70 OR  tq ≥ 0.65  →  RISK_MEDIUM_CONVICTION
 #   B   conf ≥ 0.60 OR  tq ≥ 0.50  →  RISK_LOW_CONVICTION
 #   C   otherwise                   →  RISK_MIN_CONVICTION
-RISK_HIGH_CONVICTION    = float(os.environ.get("RISK_HIGH_CONVICTION",    "2.5"))
-RISK_MEDIUM_CONVICTION  = float(os.environ.get("RISK_MEDIUM_CONVICTION",  "1.8"))
-RISK_LOW_CONVICTION     = float(os.environ.get("RISK_LOW_CONVICTION",     "1.0"))
-RISK_MIN_CONVICTION     = float(os.environ.get("RISK_MIN_CONVICTION",     "0.5"))
+RISK_HIGH_CONVICTION    = float(os.environ.get("RISK_HIGH_CONVICTION",    "1.2"))
+RISK_MEDIUM_CONVICTION  = float(os.environ.get("RISK_MEDIUM_CONVICTION",  "0.8"))
+RISK_LOW_CONVICTION     = float(os.environ.get("RISK_LOW_CONVICTION",     "0.5"))
+RISK_MIN_CONVICTION     = float(os.environ.get("RISK_MIN_CONVICTION",     "0.3"))
 
 # ── TIME-BASED EXIT ───────────────────────────────────────────────
 MAX_TRADE_DURATION_MINUTES = 600
@@ -378,9 +372,9 @@ SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "20
 # gates MEANINGFUL — they must agree with the documented design. The entry
 # context scorer may relax them slightly within bounded floors (see
 # entry_context.py) but can never push them to noise level.
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.40"))
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))
 
 # Entry context scorer — thresholds for autonomous gate adaptation
 ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
@@ -431,7 +425,7 @@ MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.5"))
 # This is what kills sub-pip structural targets: a 0.15-pip target against a
 # 1.2-pip cost is net-negative and can never clear the floor. MIN_RR_FLOOR above
 # is the GROSS (pre-cost) pip floor; this is the stricter, cost-aware money floor.
-MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.5"))
+MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.2"))
 
 # ── Phase 3: Post-BOS/CHoCH retest entry state machine ────────────
 # When enabled, the strategy no longer fires on every M1 momentum signal. Instead
@@ -458,10 +452,9 @@ RETEST_MIN_DISPLACEMENT_ATR: float = float(os.environ.get("RETEST_MIN_DISPLACEME
 RETEST_SHADOW_MODE:        bool  = os.environ.get("RETEST_SHADOW_MODE", "true").lower() == "true"
 
 # ── Entry gate strategy flag ──────────────────────────────────────
-# SAFE DEFAULT: observation mode. The bot evaluates and logs every signal but
-# places NO trades until STRATEGY_GATE_ENABLED=true is set explicitly in .env.
-# A losing/uncertain system must earn the right to trade live.
-STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "false").lower() == "true"
+# Enable live execution with the conservative defaults above. The bot will now
+# evaluate signals and place trades once all other safety gates pass.
+STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "true").lower() == "true"
 
 # ── Tick Analytics ────────────────────────────────────────────────
 # Set any of these to "false" in .env to disable that subsystem.
