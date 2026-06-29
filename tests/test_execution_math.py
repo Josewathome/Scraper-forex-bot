@@ -205,6 +205,18 @@ def test_structure_aware_tp():
     _, _, d1, _ = EntryGate._compute_targets(sig3, px, sl, pc5, m5_atr=0.0)
     assert abs(d1 - (9.0 - buf)) < 0.01
 
+    # (f) Structural level < MIN_TP1_DISTANCE_PIPS (after buffer) is skipped;
+    #     the bot falls back to the RR-based target (1.5R = 15 pips on a 10-pip SL).
+    #     This is the fix for the June-29 spread_cost_excessive block on USDJPY:
+    #     the nearest swing was 2–3 pips away, making spread ≥25% of target.
+    old_min = cfg.MIN_TP1_DISTANCE_PIPS
+    cfg.MIN_TP1_DISTANCE_PIPS = 4.0
+    sig_close = _Sig("GBPUSD", Direction.BULLISH, tp_levels=[px + 0.0003])   # 3-pip level → 2 pips after buf
+    _, _, d1_close, rr_close = EntryGate._compute_targets(sig_close, px, sl, pc5, m5_atr=0.0)
+    cfg.MIN_TP1_DISTANCE_PIPS = old_min
+    assert abs(rr_close - 1.5) < 1e-6, f"Expected RR fallback (1.5R=15p), got rr={rr_close:.4f} d1={d1_close:.2f}"
+    assert abs(d1_close - 15.0) < 0.01, f"Expected fallback d1=15.0, got {d1_close:.2f}"
+
 
 # ── 5c. Gold disabled by default on small accounts ───────────────────────────────
 

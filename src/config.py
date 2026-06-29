@@ -412,6 +412,13 @@ TP1_ATR_CAP_MULT: float = float(os.environ.get("TP1_ATR_CAP_MULT", "2.5"))
 # Exit this many pips BEFORE the opposing swing (don't sit at the level where
 # liquidity rests / price reverses). Per-symbol pip units (gold pip = $0.01).
 TP_STRUCT_BUFFER_PIPS: float = float(os.environ.get("TP_STRUCT_BUFFER_PIPS", "1.0"))
+# Structural TP1 levels closer than this (in pips, after the buffer) are skipped.
+# The bot falls back to the fixed-RR target (sl × TP1_RR_RATIO) instead.
+# This prevents the spread_cost_excessive block that fires when the nearest swing
+# is 2–3 pips away: spread alone eats ≥25% of such a tiny target.
+# June-29 log analysis: ALL entries were blocked by spread_cost_excessive on
+# USDJPY because structural levels were 2–3 pips away while spread was ~0.8–1.2 pips.
+MIN_TP1_DISTANCE_PIPS: float = float(os.environ.get("MIN_TP1_DISTANCE_PIPS", "4.0"))
 # Minimum reward:risk accepted AFTER capping. Lowered 1.0 → 0.8: FX scalps
 # naturally have stops a bit wider than the realistic move, so a hard 1.0 floor
 # rejected most of them. The EV gate (which uses the REAL rolling win rate) is

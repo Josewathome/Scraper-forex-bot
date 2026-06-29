@@ -743,16 +743,28 @@ class EntryGate:
 
         if getattr(config, "TP_STRUCTURE_AWARE", True):
             levels = list(getattr(signal, "tp_levels", []) or [])
+            # Skip structural levels that are too close to be viable after spread cost.
+            # When the nearest swing is only 2–3 pips away the spread eats ≥25% of
+            # the target (spread_cost_excessive). Fall back to the RR-based target
+            # instead of locking in a guaranteed loser.
+            min_tp1_dist = pip_calc.pips_to_price(
+                getattr(config, "MIN_TP1_DISTANCE_PIPS", 4.0)
+            )
             if is_long:
-                # opposing levels above price, buffered, nearest first
-                tgts = sorted(p - buf for p in levels if (p - buf) - current_price > 0)
+                # opposing levels above price, buffered, at least min_tp1_dist away
+                tgts = sorted(
+                    p - buf for p in levels
+                    if (p - buf) - current_price >= min_tp1_dist
+                )
                 if tgts:
                     tp1_dist = tgts[0] - current_price
                     if len(tgts) > 1:
                         tp2_dist = tgts[1] - current_price
             else:
-                tgts = sorted((p + buf for p in levels if current_price - (p + buf) > 0),
-                              reverse=True)
+                tgts = sorted(
+                    (p + buf for p in levels if current_price - (p + buf) >= min_tp1_dist),
+                    reverse=True,
+                )
                 if tgts:
                     tp1_dist = current_price - tgts[0]
                     if len(tgts) > 1:
