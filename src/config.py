@@ -195,9 +195,9 @@ MONITOR_TRAIL_ATR_BUFFER = 0.5
 # ── TRADE QUALITY SCORING ─────────────────────────────────────────
 TRADE_SCORE_THRESHOLD   = 2
 # Minimum composite TradeQuality score (0.0–1.0) for entry to proceed.
-# 0.50 is still selective while allowing more structurally sound setups to
-# pass than the older 0.60 floor.
-TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.50"))
+# 0.60 is the edge_floors hard floor: below 0.60, ranging and mid-range
+# entries pass quality check. Required by validate_edge_floors().
+TQ_BASE_MIN: float = float(os.environ.get("TQ_BASE_MIN", "0.60"))
 
 # ── DYNAMIC POSITION SIZING ───────────────────────────────────────
 # Quality-weighted risk per grade (now wired via MarginManager):
@@ -301,7 +301,7 @@ SCALPER_SYMBOL_SESSIONS: dict = {
 # 1.5 allows thin-but-moving markets (e.g. USDJPY at 01:00 UTC) while
 # blocking genuinely dead price action.  Raise to 2.5 if you see too
 # many low-quality Asian session signals during live observation.
-SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.2"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable (1.5→1.2: 1.5 was rejecting ~39% of in-session signals; velocity is a liquidity gate, not an edge gate)
+SCALPER_MIN_TICK_VELOCITY: float = float(os.environ.get("SCALPER_MIN_TICK_VELOCITY", "1.0"))  # ticks/sec floor — blocks dead/illiquid markets where scalp fills are unreliable (1.5→1.2→1.0: aligns default with edge_floors hard floor; velocity is a liquidity gate, not an edge gate)
 
 SCALPER_MIN_SL_PIPS: dict = {
     "GBPUSD": 3.0,
@@ -372,9 +372,9 @@ SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "20
 # gates MEANINGFUL — they must agree with the documented design. The entry
 # context scorer may relax them slightly within bounded floors (see
 # entry_context.py) but can never push them to noise level.
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.40"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
 
 # Entry context scorer — thresholds for autonomous gate adaptation
 ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
@@ -432,7 +432,7 @@ MIN_RR_FLOOR: float = float(os.environ.get("MIN_RR_FLOOR", "1.5"))
 # This is what kills sub-pip structural targets: a 0.15-pip target against a
 # 1.2-pip cost is net-negative and can never clear the floor. MIN_RR_FLOOR above
 # is the GROSS (pre-cost) pip floor; this is the stricter, cost-aware money floor.
-MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.2"))
+MIN_NET_RR_AFTER_COST: float = float(os.environ.get("MIN_NET_RR_AFTER_COST", "1.5"))
 
 # ── Phase 3: Post-BOS/CHoCH retest entry state machine ────────────
 # When enabled, the strategy no longer fires on every M1 momentum signal. Instead
@@ -480,20 +480,19 @@ TICK_ANALYTICS_SCHEDULE:  bool = os.environ.get("TICK_ANALYTICS_SCHEDULE",  "tru
 # switches to the measured rolling win rate / avg win / avg loss instead.
 # During the bootstrap phase a conservative haircut is applied so the bot does
 # not assume an edge it has not demonstrated.
-ASSUMED_WIN_RATE:        float = float(os.environ.get("ASSUMED_WIN_RATE",        "0.50"))
+ASSUMED_WIN_RATE:        float = float(os.environ.get("ASSUMED_WIN_RATE",        "0.55"))  # 0.50→0.55: post-BOS/CHoCH retest entries have structural directional bias; 0.50 (coin flip) was too pessimistic for bootstrap phase on ECN where slippage is minimal
 ASSUMED_WIN_RATE_HAIRCUT: float = float(os.environ.get("ASSUMED_WIN_RATE_HAIRCUT", "0.05"))
 EV_MIN_PIPS:             float = float(os.environ.get("EV_MIN_PIPS",             "0.10"))
 EV_ROLLING_WINDOW:       int   = int(os.environ.get("EV_ROLLING_WINDOW",         "50"))
 EV_MIN_SAMPLES:          int   = int(os.environ.get("EV_MIN_SAMPLES",            "30"))
 # Slippage allowance (pips) added to the round-trip cost ONLY in the BOOTSTRAP
-# EV estimate. Round-trip spread+commission alone implies a ~50% break-even on a
-# 7/5-pip scalp, but real fills slip ~1 pip on entry + the market stop on exit,
-# pushing the true break-even to ~56%. Charging this allowance up front stops the
-# gate greenlighting trades that are only profitable under perfect execution.
+# EV estimate. Covers the gap between quoted spread and true fill cost on entry +
+# any adverse price movement on the stop exit. Calibrated to the broker account type:
+#   ECN/Raw (ICMarketsKE): actual slippage 0.05–0.20 pip → default 0.2
+#   Standard/Zero-spread:  slippage can reach 0.5–1.0 pip  → override to 0.5
 # NOT added once rolling broker-truth win/loss exist — those already include
-# realised slippage (double-counting would over-reject). FX-calibrated (1 pip);
-# negligible for gold's $0.01 pips (gold is disabled by default anyway).
-EV_SLIPPAGE_PIPS:        float = float(os.environ.get("EV_SLIPPAGE_PIPS",        "1.0"))
+# realised slippage (double-counting would over-reject).
+EV_SLIPPAGE_PIPS:        float = float(os.environ.get("EV_SLIPPAGE_PIPS",        "0.2"))
 # Expected exit R used to model the tiered TP plan in the EV gate's avg_win.
 # Conservative default for the runner = TP1 RR (assume the runner gives back to TP1).
 RUNNER_EXIT_RR:          float = float(os.environ.get("RUNNER_EXIT_RR",          str(SCALPER_TP1_RR)))
