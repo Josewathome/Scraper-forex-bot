@@ -264,8 +264,9 @@ def test_ev_status_and_gold_viability():
     eg = _eg()
     # Unknown cost → "unknown" (never explored).
     assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(20.0, 3.5, 0.0)) == "unknown"
-    # NEW gold params: marginal bootstrap EV → "negative" but exploration-eligible.
-    assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(20.0, 3.5, 1.0)) == "negative"
+    # Very wide 50-pip gold spread → bootstrap EV negative → exploration-eligible.
+    # (With ECN slippage=0.2 and WR=0.55: blended_win~279, EV=0.50×279-0.50×180-(57+0.2)=-7.7)
+    assert eg._ev_status("XAUUSD", 180.0, 270.0, BrokerCost(50.0, 3.5, 1.0)) == "negative"
     # Exploration is disabled by default (edge floor); enable to test the mechanism.
     _saved_expl = cfg.EXPLORATION_ENABLED
     cfg.EXPLORATION_ENABLED = True

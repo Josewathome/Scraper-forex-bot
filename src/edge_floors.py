@@ -78,8 +78,8 @@ def validate_edge_floors() -> None:
     # Below 1.0 ticks/sec the market is genuinely dead and fills are unreliable.
     # (Floor relaxed 1.5→1.0: velocity is a LIQUIDITY gate, not an edge gate.
     # 1.5 rejected ~39% of in-session signals; the per-trade edge is protected by
-    # MIN_RR / cost / EV floors, not by velocity. Default is 1.2; the hard floor
-    # below which we refuse to boot is 1.0 — genuinely dead market.)
+    # MIN_RR / cost / EV floors, not by velocity. Default matches the hard floor
+    # at 1.0 — genuinely dead market.)
     tick_vel = getattr(cfg, "SCALPER_MIN_TICK_VELOCITY", None)
     if tick_vel is None or tick_vel < 1.0:
         failures.append(
