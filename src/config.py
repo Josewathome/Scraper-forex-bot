@@ -372,9 +372,16 @@ SCALPER_MAX_OPEN_TRADES: int = int(os.environ.get("SCALPER_MAX_OPEN_TRADES", "20
 # gates MEANINGFUL — they must agree with the documented design. The entry
 # context scorer may relax them slightly within bounded floors (see
 # entry_context.py) but can never push them to noise level.
-SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.55"))
-SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.50"))
-SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.30"))
+# Jul-03: loosened again (0.55→0.50 / 0.50→0.40 / 0.30→0.20) after log analysis
+# showed GATE1 (alignment) + GATE5 (tick) alone caused ~86% of all no-signal
+# blocks across GBPUSD/USDJPY since Jun-05, including a 15-day zero-trade
+# drought. Unlike a8eb710 (reverted by 4fa89da), this pass does NOT touch
+# TQ_BASE_MIN, MIN_RR_FLOOR, MAX_TRADES_PER_SYMBOL, or tick velocity — those
+# are validate_edge_floors() hard floors tied to the actual EV math, not raw
+# signal-quality thresholds, and stay as restored on Jun-30.
+SCALPER_MIN_ALIGNMENT_SCORE: float = float(os.environ.get("SCALPER_MIN_ALIGNMENT_SCORE", "0.50"))
+SCALPER_MIN_TICK_SCORE:      float = float(os.environ.get("SCALPER_MIN_TICK_SCORE",      "0.40"))
+SCALPER_MIN_CANDLE_SCORE:    float = float(os.environ.get("SCALPER_MIN_CANDLE_SCORE",    "0.20"))
 
 # Entry context scorer — thresholds for autonomous gate adaptation
 ENTRY_TICK_CONFIRMS_MIN_SCORE: float = float(os.environ.get("ENTRY_TICK_CONFIRMS_MIN_SCORE", "0.25"))
