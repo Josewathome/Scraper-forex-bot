@@ -5,7 +5,7 @@ Settings come from config.py.
 """
 from __future__ import annotations
 import logging
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timedelta
 from typing import List, Optional
 
 import src.config as config
@@ -44,8 +44,7 @@ class NewsManager:
 
     # ── Public API ────────────────────────────
 
-    def refresh_if_needed(self, now: Optional[datetime] = None) -> None:
-        now = now or datetime.now(tz=timezone.utc)
+    def refresh_if_needed(self, now: datetime) -> None:
         if self._last_refresh is None or (now - self._last_refresh) >= self._refresh_interval:
             self._last_refresh = now
             try:
@@ -62,9 +61,7 @@ class NewsManager:
             return False
         return (now - self._last_refresh_ok) <= self._max_staleness
 
-    def is_blocked(self, symbol: str, now: Optional[datetime] = None) -> bool:
-        now = now or datetime.now(tz=timezone.utc)
-
+    def is_blocked(self, symbol: str, now: datetime) -> bool:
         # ── FAIL CLOSED when no trustworthy news source ────────────
         # When configured to require an external feed and none is present, the
         # only coverage is MT5's best-effort calendar — block rather than trade

@@ -596,9 +596,18 @@ class MT5Gateway:
         deals = mt5.history_deals_get(position=ticket)
         if deals is None or len(deals) == 0:
             # History may not be selected yet — select a recent window and retry.
+            # Anchor the window on MT5's own server time (not the host clock —
+            # see mt5_time.mt5_epoch_to_datetime), stripped to naive to match
+            # this module's convention for MT5 datetime params (get_candles_range
+            # does the same: "MT5 Python <= 5.0.36 rejects timezone-aware
+            # datetimes ... datetimes are already bot time").
             try:
-                mt5.history_select(_dt.datetime.now() - _dt.timedelta(days=3),
-                                   _dt.datetime.now() + _dt.timedelta(days=1))
+                from src.infrastructure.mt5_time import mt5_epoch_to_datetime
+                server_ts = self.get_server_time()
+                anchor = (mt5_epoch_to_datetime(server_ts).replace(tzinfo=None)
+                          if server_ts is not None else _dt.datetime.utcnow())
+                mt5.history_select(anchor - _dt.timedelta(days=3),
+                                   anchor + _dt.timedelta(days=1))
             except Exception as exc:
                 logger.debug("history_select failed for position %s: %s", ticket, exc)
             deals = mt5.history_deals_get(position=ticket)

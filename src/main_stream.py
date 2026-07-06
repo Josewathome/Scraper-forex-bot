@@ -191,17 +191,24 @@ def _seed_builders(
 def run_stream() -> None:
     gw = connect_mt5()
 
-    clock     = BrokerClock(gw)   # TrueTimeClock NTP-calibrated inside
-    true_now  = clock.now()
-    logger.info("True UTC at startup (NTP): %s", true_now.strftime("%Y-%m-%dT%H:%M:%S"))
-
+    # Calibrate the broker-to-real-world-hour offset ONCE, here, before
+    # anything reads MT5 time. This is the only place the host clock is
+    # read at all (detect_utc_offset() compares one MT5 tick against
+    # time.time() to measure the offset) — the result is a static constant
+    # (config.BROKER_UTC_OFFSET_HOURS) that mt5_time.mt5_epoch_to_datetime
+    # applies to every MT5 timestamp from here on. The host clock is never
+    # consulted again after this one measurement.
     _detected_offset = gw.detect_utc_offset()
     if _detected_offset != 0:
         config.BROKER_UTC_OFFSET_HOURS = _detected_offset
     logger.info(
-        "Broker UTC offset: UTC%+d (detected=%+d)",
+        "MT5-to-real-world-hour offset: UTC%+d (detected=%+d, applied once at startup)",
         config.BROKER_UTC_OFFSET_HOURS, _detected_offset,
     )
+
+    clock   = BrokerClock(gw)   # MT5 server time, offset-corrected — no NTP, no host clock
+    bot_now = clock.now()
+    logger.info("Bot time at startup (MT5-derived): %s", bot_now.strftime("%Y-%m-%dT%H:%M:%S"))
 
     acc = gw.get_account_info()
     if acc:
@@ -282,18 +289,17 @@ def run_stream() -> None:
         min_rr=            config.MIN_RR,
         account_currency=  config.ACCOUNT_CURRENCY,
         journal=           TradeJournal(),
-        clock=             clock,
     )
 
     # ── Entry gate ─────────────────────────────────────────────────────
     entry_gate = EntryGate(news_manager=news_manager, execution=execution)
     _startup_balance = (gw.get_account_info() or {}).get("balance", 0.0)
-    entry_gate.on_new_day(_startup_balance)
+    entry_gate.on_new_day(_startup_balance, now=clock.now())
 
     cleanup    = CleanupService()
     checkpoint = CheckpointService(getattr(config, "CHECKPOINT_DIR", ".checkpoints"))
     email_svc  = EmailService()
-    scheduler  = Scheduler()
+    scheduler  = Scheduler(clock=clock)
 
     # ── Restore checkpoint ─────────────────────────────────────────────
     cp = checkpoint.load()
@@ -339,17 +345,17 @@ def run_stream() -> None:
         for _hr in range(24):
             scheduler.add_daily(
                 f"tick_analytics_hourly_{_hr:02d}",
-                lambda _now=None, _a=_tick_analytics: _a.run_hourly(_now or datetime.now(tz=timezone.utc)),
+                lambda _a=_tick_analytics, _clk=clock: _a.run_hourly(_clk.now()),
                 hour=_hr,
             )
         scheduler.add_daily(
             "tick_analytics_daily",
-            lambda _now=None, _a=_tick_analytics: _a.run_daily(_now or datetime.now(tz=timezone.utc)),
+            lambda _a=_tick_analytics, _clk=clock: _a.run_daily(_clk.now()),
             hour=22,
         )
         scheduler.add_weekly(
             "tick_analytics_weekly",
-            lambda _now=None, _a=_tick_analytics: _a.run_weekly(_now or datetime.now(tz=timezone.utc)),
+            lambda _a=_tick_analytics, _clk=clock: _a.run_weekly(_clk.now()),
             weekday=4,
             hour=21,
         )
@@ -425,7 +431,7 @@ def run_stream() -> None:
             sym = event.get("sym", "")
             if sym in config.SYMBOLS:
                 try:
-                    execution.run_monitoring_only(sym)
+                    execution.run_monitoring_only(sym, now)
                 except Exception as exc:
                     logger.exception("Monitoring [%s]: %s", sym, exc)
                 try:
@@ -439,25 +445,20 @@ def run_stream() -> None:
                     logger.debug("Strategy tick push [%s]: %s", sym, exc)
 
         # ── CANDLE_CLOSED ──────────────────────────────────────────────
-        elif etype in ("CANDLE_CLOSED", "BAR_CLOSE"):
-            if etype == "CANDLE_CLOSED":
-                candle = event.get("candle")
-                if candle is None:
-                    continue
-                sym = candle.symbol
-                tf  = candle.timeframe
-                try:
-                    strategy.on_candle(candle)
-                except Exception as exc:
-                    logger.debug("Strategy on_candle [%s/%s]: %s", sym, tf.value, exc)
-            else:
-                sym = event.get("sym", "")
-                tf_s = event.get("tf", "")
-                tf_map = {"M1": Timeframe.M1, "M5": Timeframe.M5, "M30": Timeframe.M30,
-                          "H1": Timeframe.H1, "H4": Timeframe.H4}
-                tf = tf_map.get(tf_s)
-                if tf is None:
-                    continue
+        # Sole source for candle-close events: CandleBuilder's _on_close
+        # callback, fired exactly once per bar (either from the tick-driven
+        # finalizer, or from the EA's BAR_CLOSE correction path when it's
+        # genuinely a new bar — see CandleBuilder.on_bar_close_from_ea).
+        elif etype == "CANDLE_CLOSED":
+            candle = event.get("candle")
+            if candle is None:
+                continue
+            sym = candle.symbol
+            tf  = candle.timeframe
+            try:
+                strategy.on_candle(candle)
+            except Exception as exc:
+                logger.debug("Strategy on_candle [%s/%s]: %s", sym, tf.value, exc)
 
             if sym not in config.SYMBOLS:
                 continue
@@ -486,7 +487,7 @@ def run_stream() -> None:
             )
             if sym in config.SYMBOLS:
                 try:
-                    execution.run_monitoring_only(sym)
+                    execution.run_monitoring_only(sym, now)
                 except Exception as exc:
                     logger.exception("Post-trade monitoring [%s]: %s", sym, exc)
 
@@ -528,6 +529,13 @@ def _run_strategy_evaluation(
     if builder is None:
         return
 
+    if now is None:
+        logger.error(
+            "_run_strategy_evaluation [%s] called without `now` — refusing to fall back "
+            "to the host clock; skipping this evaluation cycle.", symbol,
+        )
+        return
+
     m1_candles = builder.get_closed_candles(TF.M1, 60)
     # Pass M5 candles in the h1_candles slot — ScalperAlignmentEngine uses M5 context
     m5_candles = builder.get_closed_candles(TF.M5, 30)
@@ -537,10 +545,7 @@ def _run_strategy_evaluation(
         return
 
     if forming_m1 is not None:
-        try:
-            elapsed = max(0.0, min(60.0, (stream_repo.now() - forming_m1.time).total_seconds()))
-        except Exception:
-            elapsed = 30.0
+        elapsed = max(0.0, min(60.0, (now - forming_m1.time).total_seconds()))
     else:
         elapsed = 30.0
 
@@ -562,7 +567,6 @@ def _run_strategy_evaluation(
     # Called unconditionally — signal=None is valid input (means "no setup").
     if entry_gate is not None:
         _structure = getattr(strategy, "_structure", {}).get(symbol)
-        _eval_now  = now or datetime.now(tz=timezone.utc)
         try:
             entry_gate._exec.run_trade_revaluation(
                 symbol=symbol,
@@ -570,7 +574,7 @@ def _run_strategy_evaluation(
                 structure=_structure,
                 m1_candles=m1_candles,
                 m5_candles=m5_candles,
-                now=_eval_now,
+                now=now,
             )
         except Exception as exc:
             logger.exception("Trade revaluation [%s]: %s", symbol, exc)
@@ -604,18 +608,12 @@ def _run_strategy_evaluation(
     if entry_gate is None or not getattr(config, "STRATEGY_GATE_ENABLED", False):
         return
 
-    eval_now = now or datetime.now(tz=timezone.utc)
-
-    # Always use UTC date — eval_now may be broker-local time (UTC+3)
-    try:
-        today = eval_now.astimezone(timezone.utc).date().isoformat()
-    except (AttributeError, TypeError):
-        today = eval_now.date().isoformat()
+    today = now.date().isoformat()
     if _last_gate_day.get(symbol) != today:
         _last_gate_day[symbol] = today
         try:
             bal = (gw.get_account_info() or {}).get("balance", 0.0) if gw else 0.0
-            entry_gate.on_new_day(bal)
+            entry_gate.on_new_day(bal, now=now)
         except Exception:
             pass
 
@@ -655,7 +653,7 @@ def _run_strategy_evaluation(
         signal=        signal,
         builder=       builder,
         current_price= current_price,
-        now=           eval_now,
+        now=           now,
         balance=       balance,
         pip_calc=      pip_calc,
         pip_value=     pip_value,
@@ -669,10 +667,10 @@ def _run_strategy_evaluation(
 
     exec_svc = entry_gate._exec
     try:
-        trade = exec_svc.execute_entry_candidate(candidate)
+        trade = exec_svc.execute_entry_candidate(candidate, now)
         if trade:
-            entry_gate.record_trade()
-            entry_gate.record_fill(symbol, signal.direction)
+            entry_gate.record_trade(now=now)
+            entry_gate.record_fill(symbol, signal.direction, now=now)
             if getattr(candidate, "_exploration", False):
                 entry_gate.record_exploration(symbol)
             logger.info(
@@ -685,7 +683,7 @@ def _run_strategy_evaluation(
                 trade.entry_price,
                 trade.stop_loss,
                 trade.take_profit,
-                entry_gate.daily_trade_count(),
+                entry_gate.daily_trade_count(now=now),
             )
     except Exception as exc:
         logger.exception("Strategy trade execution [%s]: %s", symbol, exc)

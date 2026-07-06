@@ -3,14 +3,12 @@ trade_repo.py — MT5 Trade Execution  (v3 — partial close + modify_sl)
 """
 from __future__ import annotations
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-
-from src import config
 
 from src.domain.entities import Direction, Trade, TradeStatus
 from src.domain.repositories import ITradeRepository
 from src.infrastructure.mt5_bridge.mt5_gateway import MT5Gateway
+from src.infrastructure.mt5_time import mt5_epoch_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -187,8 +185,7 @@ class MT5TradeRepository(ITradeRepository):
         trades = []
         for p in raw:
             direction = Direction.BULLISH if p["type"] == "BUY" else Direction.BEARISH
-            open_dt   = datetime.fromtimestamp(p["open_time"], tz=timezone.utc) \
-                        - timedelta(hours=getattr(config, "BROKER_UTC_OFFSET_HOURS", 0))
+            open_dt   = mt5_epoch_to_datetime(p["open_time"])
             trades.append(Trade(
                 id=          str(p["ticket"]),
                 symbol=      p["symbol"],

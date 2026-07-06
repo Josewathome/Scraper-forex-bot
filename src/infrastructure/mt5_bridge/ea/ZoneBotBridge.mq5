@@ -36,9 +36,15 @@ string   g_bar_keys[];
 datetime g_bar_last_open[];
 int      g_bar_count = 0;
 
-datetime g_last_tick_time    = 0;
-datetime g_last_conn_attempt = 0;
+ulong    g_last_tick_ms      = 0;   // GetTickCount64()-gated heartbeat interval — see below
+ulong    g_last_conn_attempt_ms = 0; // GetTickCount64()-gated reconnect-retry interval — see below
 int      g_conn_retry_secs   = 5;
+// Both intervals above used to be gated on TimeCurrent(), which freezes
+// whenever no new quotes arrive (market closed / weekend / thin liquidity).
+// That silently stopped both the heartbeat AND the reconnect retry for the
+// whole quiet period — if the TCP connection ever dropped during a quiet
+// spell, the EA could never retry on its own. GetTickCount64() is a
+// wall-clock-independent millisecond counter that always advances.
 
 void _ParseEndpoint(const string ep)
 {
@@ -69,9 +75,9 @@ void _Send(const string msg)
 
 void _TryConnect()
 {
-   datetime now = TimeCurrent();
-   if(now - g_last_conn_attempt < g_conn_retry_secs) return;
-   g_last_conn_attempt = now;
+   ulong now_ms = GetTickCount64();
+   if(now_ms - g_last_conn_attempt_ms < (ulong)g_conn_retry_secs * 1000) return;
+   g_last_conn_attempt_ms = now_ms;
 
    if(g_sock != INVALID_HANDLE) { SocketClose(g_sock); g_sock = INVALID_HANDLE; }
    g_connected = false;
@@ -134,7 +140,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    if(!g_connected) { _TryConnect(); return; }
-   g_last_tick_time = TimeCurrent();
+   g_last_tick_ms = GetTickCount64();
 
    string tfs[5]; tfs[0]="M1"; tfs[1]="M5"; tfs[2]="M30"; tfs[3]="H1"; tfs[4]="H4";
    ENUM_TIMEFRAMES tf_enum[5];
@@ -183,11 +189,13 @@ void OnTick()
 void OnTimer()
 {
    if(!g_connected) { _TryConnect(); return; }
-   datetime now = TimeCurrent();
-   if(now - g_last_tick_time >= HEARTBEAT_SECS)
+   // Gate on GetTickCount64() (always advances), not TimeCurrent() (freezes
+   // when no new quotes arrive) — see g_last_tick_ms declaration above.
+   ulong now_ms = GetTickCount64();
+   if(now_ms - g_last_tick_ms >= (ulong)HEARTBEAT_SECS * 1000)
    {
-      _Send(StringFormat("HEARTBEAT {\"time\":%d}", (int)now));
-      g_last_tick_time = now;
+      _Send(StringFormat("HEARTBEAT {\"time\":%d}", (int)TimeCurrent()));
+      g_last_tick_ms = now_ms;
    }
 }
 

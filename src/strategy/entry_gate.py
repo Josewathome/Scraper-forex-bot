@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import uuid
@@ -125,10 +125,11 @@ class EntryGate:
 
     # ── Public API ─────────────────────────────────────────────────
 
-    def on_new_day(self, balance: float) -> None:
-        # Guard: only execute once per UTC calendar day regardless of how many
-        # times main_stream calls this (one call per symbol per event loop tick).
-        today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    def on_new_day(self, balance: float, now: datetime) -> None:
+        # Guard: only execute once per calendar day (bot/MT5 time) regardless
+        # of how many times main_stream calls this (one call per symbol per
+        # event loop tick).
+        today_utc = now.date().isoformat()
         if self._last_new_day_utc == today_utc:
             return
         self._last_new_day_utc = today_utc
@@ -142,17 +143,17 @@ class EntryGate:
         self._session_start_equity = equity
         logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
 
-    def record_trade(self) -> None:
+    def record_trade(self, now: datetime) -> None:
         """Increment informational daily counter and record fill time."""
-        today = datetime.now(tz=timezone.utc).date().isoformat()
+        today = now.date().isoformat()
         self._daily_counts[today] = self._daily_counts.get(today, 0) + 1
 
-    def record_fill(self, symbol: str, direction: Direction) -> None:
+    def record_fill(self, symbol: str, direction: Direction, now: datetime) -> None:
         """Record a successful fill for anti-duplicate tracking."""
-        self._last_fill.setdefault(symbol, {})[direction.value] = datetime.now(tz=timezone.utc)
+        self._last_fill.setdefault(symbol, {})[direction.value] = now
 
-    def daily_trade_count(self) -> int:
-        today = datetime.now(tz=timezone.utc).date().isoformat()
+    def daily_trade_count(self, now: datetime) -> int:
+        today = now.date().isoformat()
         return self._daily_counts.get(today, 0)
 
     def evaluate(
@@ -449,7 +450,7 @@ class EntryGate:
             sl_dist_pips, eff_rr,
             " (capped)" if eff_rr < getattr(config, "TP1_RR_RATIO", 1.5) - 1e-6 else "",
             "EXPLORATION" if is_exploration else "EV_OK",
-            self.daily_trade_count(),
+            self.daily_trade_count(now=now),
         )
 
         candidate._eval_id = eval_id
@@ -499,7 +500,7 @@ class EntryGate:
     @staticmethod
     def _in_session(symbol: str, now: datetime) -> bool:
         start, end = _symbol_session(symbol)
-        # now is true UTC (NTP-calibrated via BrokerClock → TrueTimeClock). Use hour directly.
+        # now is bot time (MT5 server time, offset-corrected via BrokerClock). Use hour directly.
         h = now.hour
         if start <= end:
             return start <= h < end

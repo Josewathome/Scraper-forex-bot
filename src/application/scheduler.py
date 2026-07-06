@@ -2,10 +2,12 @@
 scheduler.py — Lightweight background task scheduler.
 
 Runs periodic tasks in daemon threads so they never block the main
-trading loop.  All times are UTC.
+trading loop. Task-firing decisions use the injected clock's MT5-derived
+time (see __init__), not the host clock, so scheduled jobs stay consistent
+with every other time-based decision in the bot.
 
 Usage:
-    sched = Scheduler()
+    sched = Scheduler(clock=broker_clock)
     sched.add_daily("cleanup",          cleanup_fn, hour=2)
     sched.add_weekly("weekly_backtest", backtest_fn, weekday=5, hour=6)
     sched.start()
@@ -24,11 +26,25 @@ _POLL_INTERVAL = 60   # seconds between schedule checks
 
 class Scheduler:
 
-    def __init__(self) -> None:
+    def __init__(self, clock=None) -> None:
+        """
+        `clock` should be the bot's MT5-derived BrokerClock. Daily/weekly
+        task-firing decisions are made against clock.now() so scheduled jobs
+        (cleanup, market-close wipe, analytics) fire on MT5 time, consistent
+        with every other time-based decision in the bot. If no clock is
+        given, falls back to the host clock — logged once so that's never
+        a silent surprise.
+        """
         self._tasks: List[Tuple[Any, ...]] = []
         self._last_run: dict = {}
         self._running = False
         self._thread: threading.Thread | None = None
+        self._clock = clock
+        if clock is None:
+            logger.warning(
+                "Scheduler: no clock provided — task-firing decisions will use "
+                "the host clock instead of MT5 time."
+            )
 
     # ── Registration ─────────────────────────────────────────────────
 
@@ -71,7 +87,7 @@ class Scheduler:
 
     def _loop(self) -> None:
         while self._running:
-            now = datetime.now(tz=timezone.utc)
+            now = self._clock.now() if self._clock is not None else datetime.now(tz=timezone.utc)
             for task in self._tasks:
                 kind = task[0]
                 name = task[1]

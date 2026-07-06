@@ -13,7 +13,7 @@ from src.domain.entities import Candle, Timeframe
 from src.domain.repositories import IMarketDataRepository
 from src.domain.value_objects import PipCalculator, pip_value_per_lot
 from src.infrastructure.mt5_bridge.mt5_gateway import MT5Gateway
-from src.infrastructure.time_sync import TrueTimeClock
+from src.infrastructure.mt5_time import mt5_epoch_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -22,40 +22,114 @@ class BrokerClock:
     """
     Single source of truth for "what time is it now?" in the bot.
 
-    Uses TrueTimeClock (NTP-calibrated) as the authoritative time source.
-    The broker's MT5 tick timestamps are NOT used for absolute time — they
-    are broker-local epoch values (UTC+3) and produce wrong UTC datetimes
-    when passed to datetime.fromtimestamp(..., UTC).
+    Derived directly from MT5's own server time (the latest tick timestamp),
+    via mt5_epoch_to_datetime() — never from the host machine's clock, and
+    never from NTP. The host clock is read only as an absolute last resort
+    (see `now()`), and that fallback is logged loudly since it means MT5
+    has never once returned a usable tick since the process started.
 
-    TrueTimeClock hierarchy:
-      1. NTP UDP (pool.ntp.org, time.cloudflare.com, time.google.com)
-      2. HTTP time API (worldtimeapi.org) — UDP/123 firewalled fallback
-      3. System clock — Docker containers are NTP-synced from host
+    Cached briefly to avoid hammering MT5 on every call; while MT5 is
+    briefly unreachable (or the market is closed and the last tick is
+    stale), time is advanced by dead-reckoning: last known-good MT5 time +
+    elapsed wall-clock seconds since that reading. The wall-clock delta is
+    used only as a *duration* (how many seconds passed), never as an
+    absolute time reference, so host-clock timezone/offset never matters.
 
     Usage
     ─────
         clock = BrokerClock(gateway)
-        now   = clock.now()   # datetime, true UTC, NTP-calibrated
+        now   = clock.now()   # datetime, MT5 server time, offset-corrected
     """
 
+    _CACHE_TTL:    float = 2.0     # seconds to cache a fresh MT5 reading
+    _MAX_TICK_AGE: float = 120.0   # seconds — beyond this, dead-reckon instead
+
     def __init__(self, gateway: MT5Gateway) -> None:
-        self._gw  = gateway
-        self._true_clock = TrueTimeClock()
+        self._gw = gateway
+        self._cached_broker_ts: Optional[float]  = None   # raw MT5 epoch seconds
+        self._cached_at:        float             = 0.0    # monotonic time of last fetch
+        self._last_good_broker: Optional[datetime] = None  # last good bot-time reading
+        self._last_good_wall:   float              = 0.0   # monotonic when we got it
 
     def now(self) -> datetime:
-        """Return current true UTC datetime (NTP-calibrated). Never raises."""
-        return self._true_clock.utc_now()
+        """Return the current bot time (MT5 server time, offset-corrected). Never raises."""
+        mono = _time.monotonic()
+
+        if self._cached_broker_ts is not None and (mono - self._cached_at) < self._CACHE_TTL:
+            return mt5_epoch_to_datetime(self._cached_broker_ts)
+
+        try:
+            ts = self._gw.get_server_time()
+        except Exception:
+            ts = None
+
+        if ts is not None:
+            wall_now  = _time.time()
+            tick_age  = wall_now - ts
+            if tick_age <= self._MAX_TICK_AGE:
+                self._cached_broker_ts = float(ts)
+                self._cached_at        = mono
+                broker_dt              = mt5_epoch_to_datetime(ts)
+                self._last_good_broker = broker_dt
+                self._last_good_wall   = mono
+                return broker_dt
+            # Stale tick (market closed / weekend) — dead-reckon from the
+            # last good reading rather than trust a stale absolute value.
+            if self._last_good_broker is not None:
+                elapsed   = mono - self._last_good_wall
+                estimated = self._last_good_broker + timedelta(seconds=elapsed)
+                self._cached_broker_ts = estimated.timestamp()
+                self._cached_at        = mono
+                return estimated
+            # No prior good reading — use the stale tick directly, but seed
+            # the dead-reckoning base from it too. Without this, every
+            # subsequent call (as long as MT5 keeps returning this same
+            # stale tick — e.g. an entire weekend market closure) would
+            # fall into this exact branch again and return the identical
+            # frozen timestamp forever instead of advancing, silently
+            # breaking anything that depends on "now" moving forward while
+            # the market is closed (Scheduler's daily/weekly checks, the
+            # periodic-checkpoint interval, gap-recovery boundary math).
+            broker_dt              = mt5_epoch_to_datetime(ts)
+            self._cached_broker_ts = float(ts)
+            self._cached_at        = mono
+            self._last_good_broker = broker_dt
+            self._last_good_wall   = mono
+            return broker_dt
+
+        # MT5 unreachable this call — dead-reckon from last good reading.
+        if self._last_good_broker is not None:
+            elapsed   = mono - self._last_good_wall
+            estimated = self._last_good_broker + timedelta(seconds=elapsed)
+            self._cached_broker_ts = estimated.timestamp()
+            self._cached_at        = mono
+            logger.debug("BrokerClock: MT5 unavailable — dead-reckoning from last good MT5 time.")
+            return estimated
+
+        # Absolute last resort: MT5 has NEVER returned a usable tick since
+        # startup. There is no MT5-derived time to dead-reckon from, so this
+        # falls back to the host clock — loudly, because it means every
+        # time-based decision made right now is running on the one clock
+        # this bot is designed not to trust.
+        logger.error(
+            "BrokerClock: no MT5 time available and no prior reading — "
+            "falling back to the HOST CLOCK. Trading decisions made right now "
+            "are NOT using MT5 time. Check the MT5 connection."
+        )
+        return datetime.now(tz=timezone.utc)
 
     def invalidate(self) -> None:
-        """No-op: TrueTimeClock manages its own re-sync schedule."""
-        pass
+        """Force the next now() call to re-fetch from MT5 instead of using the cache."""
+        self._cached_broker_ts = None
         self._cached_at        = 0.0
 
 
 class MT5MarketDataRepository(IMarketDataRepository):
     """
     Fetches OHLCV data and symbol metadata directly from MT5Gateway.
-    All timestamps are converted to UTC on the way in.
+    Every timestamp is converted via mt5_epoch_to_datetime() on the way in,
+    so candle.time is always MT5 server time, offset-corrected — never the
+    host clock.
     """
 
     _SYMBOL_CACHE_TTL = 60  # seconds; symbol info refreshed at most once per minute
@@ -83,7 +157,7 @@ class MT5MarketDataRepository(IMarketDataRepository):
 
         candles = []
         for r in raw[:-1]:   # drop the last (still-forming) candle
-            ts = datetime.fromtimestamp(r["time"], tz=timezone.utc)
+            ts = mt5_epoch_to_datetime(r["time"])
             candles.append(Candle(
                 time=      ts,
                 open=      r["open"],
@@ -166,14 +240,14 @@ class MT5MarketDataRepository(IMarketDataRepository):
         return info["digits"] if info else 5
 
     def get_server_time_utc(self) -> datetime:
-        """Return broker server time (IC Markets UTC).  Never uses local clock."""
+        """Return MT5 server time, offset-corrected.  Never uses the host clock."""
         ts = self._gw.get_server_time()
         if ts is None:
             # MT5 unavailable — callers should use BrokerClock.now() instead,
             # which has dead-reckoning.  Return a safe non-local fallback.
             logger.warning("get_server_time_utc: MT5 unavailable — returning epoch 0 as sentinel.")
             return datetime.fromtimestamp(0, tz=timezone.utc)
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return mt5_epoch_to_datetime(ts)
 
     # ── Helpers ───────────────────────────────
 
@@ -207,7 +281,7 @@ class MT5MarketDataRepository(IMarketDataRepository):
             return []
         candles = []
         for r in raw:
-            ts = datetime.fromtimestamp(r["time"], tz=timezone.utc)
+            ts = mt5_epoch_to_datetime(r["time"])
             candles.append(Candle(
                 time=ts, open=r["open"], high=r["high"],
                 low=r["low"], close=r["close"], volume=r["volume"],

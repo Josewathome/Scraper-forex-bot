@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import src.config as config
@@ -487,7 +487,10 @@ class StrategyManager:
             alignment=alignment,
             tick_analysis=tick_result,
             candle_score=candle_result,
-            timestamp=datetime.now(tz=timezone.utc),
+            # MT5-derived, not host clock: the forming M1 bar's open time is
+            # the closest available "now" at signal-generation time, already
+            # offset-corrected via market_data_repo.mt5_epoch_to_datetime.
+            timestamp=forming_m1.time if forming_m1 is not None else m1_candles[-1].time,
             proposed_entry=current_price,
             last_swing_support=last_swing_support.price if last_swing_support else None,
             last_swing_resistance=last_swing_resistance.price if last_swing_resistance else None,
