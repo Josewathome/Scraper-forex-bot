@@ -31,10 +31,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 from src.domain.entities import Candle, Timeframe
+from src.infrastructure.mt5_time import mt5_epoch_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +144,8 @@ class CandleBuilder:
                 )
                 continue
 
-            if bar_open_epoch != forming.bar_open:
-                # Bar boundary crossed — finalise and emit the closed candle
+            if bar_open_epoch > forming.bar_open:
+                # Bar boundary crossed FORWARD — finalise and emit the closed candle.
                 self._finalise_bar(tf, forming)
 
                 # Start new forming bar from this tick
@@ -155,11 +155,31 @@ class CandleBuilder:
                     open=mid, high=mid, low=mid, close=mid,
                     tick_vol=1,
                 )
-            else:
+            elif bar_open_epoch == forming.bar_open:
                 # Same bar — update OHLC
                 forming.high    = max(forming.high, mid)
                 forming.low     = min(forming.low,  mid)
                 forming.close   = mid
+                forming.tick_vol += 1
+            else:
+                # bar_open_epoch < forming.bar_open means this tick's timestamp
+                # is EARLIER than the bar currently forming — a late/reordered
+                # tick (network jitter, reconnect catch-up burst). Using `!=`
+                # instead of a monotonic `>` check here would incorrectly
+                # finalise the CURRENT (newer, correct) forming bar and open a
+                # new one anchored to the earlier timestamp, appending a
+                # candle out of chronological order at the end of the closed-
+                # candle cache — which could make "most recent closed candle"
+                # jump backwards in time for any downstream consumer's
+                # session/date calculations. A late tick can't retroactively
+                # reopen an already-superseded bar without risking that
+                # corruption, so it's discarded for bar-building purposes
+                # (still fine to keep using it for tick-level analytics).
+                logger.debug(
+                    "CandleBuilder[%s/%s] discarded late/out-of-order tick "
+                    "(tick_bar=%d < forming_bar=%d)",
+                    self._symbol, tf.value, bar_open_epoch, forming.bar_open,
+                )
                 forming.tick_vol += 1
 
     def on_bar_close_from_ea(
@@ -184,13 +204,22 @@ class CandleBuilder:
         This is the "hybrid trust" approach: tick-built candles are
         preferred for real-time accuracy; EA-pushed candles serve as a
         correction layer for missed ticks.
-        """
-        closed = self._closed[timeframe]
-        if closed and closed[-1].time.timestamp() >= bar_time:
-            return  # already have this bar (or a newer one) — discard
 
+        BUG THIS FIXES: the duplicate check used to compare `bar_time` (raw
+        MT5 epoch, uncorrected) against `closed[-1].time.timestamp()`
+        (offset-corrected, via mt5_epoch_to_datetime — see that module's
+        docstring) — two different time bases, so once BROKER_UTC_OFFSET_HOURS
+        is nonzero the check is never true and every EA bar (duplicate or
+        not) falls through to _store_closed(), which catches the duplicate
+        correctly but only AFTER _on_close would have already fired
+        unconditionally (see _store_closed's docstring for why that's the
+        real bug: it corrupts StructureState.on_candle(), which appends
+        every candle it's given with no dedup of its own).  Building the
+        candle (and its corrected timestamp) first and comparing like-for-
+        like fixes the false-negative duplicate detection.
+        """
         candle = Candle(
-            time=      datetime.fromtimestamp(bar_time, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(bar_time),
             open=      open_p,
             high=      high_p,
             low=       low_p,
@@ -199,8 +228,7 @@ class CandleBuilder:
             symbol=    self._symbol,
             timeframe= timeframe,
         )
-        self._store_closed(timeframe, candle)
-        if self._on_close:
+        if self._store_closed(timeframe, candle) and self._on_close:
             self._on_close(candle)
 
     def get_closed_candles(self, timeframe: Timeframe, count: int) -> List[Candle]:
@@ -225,7 +253,7 @@ class CandleBuilder:
         if forming is None:
             return None
         return Candle(
-            time=      datetime.fromtimestamp(forming.bar_open, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(forming.bar_open),
             open=      forming.open,
             high=      forming.high,
             low=       forming.low,
@@ -240,7 +268,7 @@ class CandleBuilder:
     def _finalise_bar(self, tf: Timeframe, forming: _FormingBar) -> None:
         """Convert a forming bar to a closed Candle, store it, and fire callback."""
         candle = Candle(
-            time=      datetime.fromtimestamp(forming.bar_open, tz=timezone.utc),
+            time=      mt5_epoch_to_datetime(forming.bar_open),
             open=      forming.open,
             high=      forming.high,
             low=       forming.low,
@@ -249,18 +277,58 @@ class CandleBuilder:
             symbol=    self._symbol,
             timeframe= tf,
         )
-        self._store_closed(tf, candle)
-        logger.debug(
-            "CandleBuilder[%s/%s] bar closed | O=%.5f H=%.5f L=%.5f C=%.5f ticks=%d",
-            self._symbol, tf.value,
-            candle.open, candle.high, candle.low, candle.close, forming.tick_vol,
-        )
-        if self._on_close:
+        stored = self._store_closed(tf, candle)
+        if stored:
+            logger.debug(
+                "CandleBuilder[%s/%s] bar closed | O=%.5f H=%.5f L=%.5f C=%.5f ticks=%d",
+                self._symbol, tf.value,
+                candle.open, candle.high, candle.low, candle.close, forming.tick_vol,
+            )
+        if stored and self._on_close:
             self._on_close(candle)
 
-    def _store_closed(self, tf: Timeframe, candle: Candle) -> None:
-        cache    = self._closed[tf]
+    def _store_closed(self, tf: Timeframe, candle: Candle) -> bool:
+        """
+        Append `candle` to the closed-candle cache if it's genuinely newer
+        than what's already there; return whether it was stored.
+
+        This is the single arbiter both _finalise_bar() (tick-driven close)
+        and on_bar_close_from_ea() (EA-reported close) go through — whichever
+        of the two independently detects a given bar boundary first "wins"
+        and gets stored; the other's candle for the same bar_open is a
+        duplicate by design (both mechanisms observe the same underlying
+        market data) and must be discarded here, with its _on_close NOT
+        fired — callers gate their own _on_close call on this return value
+        for exactly that reason.
+
+        Without that gating, both mechanisms racing on every single bar
+        close (not just occasionally) used to fire two CANDLE_CLOSED events
+        per real bar close on top of a since-removed raw BAR_CLOSE
+        passthrough event — three strategy-evaluation triggers per real
+        close instead of one. Worse than the wasted evaluation cycles:
+        strategy.on_candle() (called from main_stream.py's CANDLE_CLOSED
+        handler) forwards straight into StructureState.on_candle(), which
+        unconditionally appends every candle it's given to its own rolling
+        window and increments a monotonic counter with no dedup of its own
+        — a duplicate call for the same real candle silently double-counted
+        it there, corrupting swing-high/low detection and BOS/CHoCH state.
+
+        Also serves as defense in depth for the cache's chronological-order
+        invariant that downstream consumers rely on: on_tick()'s monotonic
+        guard is the primary fix for the out-of-order-tick bug this
+        addresses, but a bad candle from any other caller shouldn't be able
+        to silently corrupt this invariant either.
+        """
+        cache = self._closed[tf]
+        if cache and candle.time <= cache[-1].time:
+            logger.debug(
+                "CandleBuilder[%s/%s] discarded duplicate/out-of-order candle "
+                "(candle.time=%s <= last.time=%s)",
+                self._symbol, tf.value, candle.time, cache[-1].time,
+            )
+            return False
         max_size = self._max_cache[tf]
         cache.append(candle)
         if len(cache) > max_size:
             del cache[0]
+        return True
