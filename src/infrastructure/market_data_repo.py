@@ -64,12 +64,22 @@ class BrokerClock:
             ts = None
 
         if ts is not None:
+            # Compare like-for-like: broker_dt is already offset-corrected
+            # (true UTC), so diff it against wall_now (also true UTC) —
+            # never diff the raw uncorrected `ts` against wall_now directly.
+            # That mismatch is the exact "two different time bases" bug
+            # candle_builder.py's on_bar_close_from_ea() had: with a nonzero
+            # BROKER_UTC_OFFSET_HOURS, comparing raw ts to true-UTC wall_now
+            # skews tick_age by offset_hours*3600 seconds, which (at the
+            # current 2-hour offset) pushes the effective staleness
+            # threshold from 120s to ~2 hours — silently defeating dead-
+            # reckoning for exactly the short MT5 hiccups it exists to catch.
             wall_now  = _time.time()
-            tick_age  = wall_now - ts
+            broker_dt = mt5_epoch_to_datetime(ts)
+            tick_age  = wall_now - broker_dt.timestamp()
             if tick_age <= self._MAX_TICK_AGE:
                 self._cached_broker_ts = float(ts)
                 self._cached_at        = mono
-                broker_dt              = mt5_epoch_to_datetime(ts)
                 self._last_good_broker = broker_dt
                 self._last_good_wall   = mono
                 return broker_dt
