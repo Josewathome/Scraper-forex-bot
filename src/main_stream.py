@@ -32,6 +32,7 @@ import queue
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -83,7 +84,16 @@ def _setup_logging() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler("logs/trading_bot.log", encoding="utf-8"),
+            # Rotate at 50 MB, keep 5 archives (~300 MB ceiling total).
+            # The previous plain FileHandler grew one file unbounded
+            # (reached 144 MB in 5 weeks). Same filename, so tailing
+            # tooling keeps working across rotation.
+            RotatingFileHandler(
+                "logs/trading_bot.log",
+                maxBytes=50 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            ),
         ],
     )
 
