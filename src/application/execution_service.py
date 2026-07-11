@@ -168,7 +168,16 @@ class ExecutionService:
     # ── Helpers ───────────────────────────────────────────────────────
 
     def open_count_for_symbol(self, symbol: str) -> int:
-        return sum(1 for p in self._tr.get_open_positions() if p.symbol == symbol)
+        positions = self._tr.get_open_positions()
+        if positions is None:
+            # Broker state unknown — fail CLOSED: report a count high enough
+            # to block any new entry rather than pretend the symbol is flat.
+            logger.warning(
+                "open_count_for_symbol(%s): broker position state unknown — failing closed",
+                symbol,
+            )
+            return 10**6
+        return sum(1 for p in positions if p.symbol == symbol)
 
     def is_symbol_paused(self, symbol: str, now: datetime) -> bool:
         """
@@ -236,6 +245,14 @@ class ExecutionService:
             return
 
         open_positions = self._tr.get_open_positions()
+        if open_positions is None:
+            # Broker state unknown — skip this re-evaluation cycle rather than
+            # analyse against a fictitious flat book. Next M1 close retries.
+            logger.warning(
+                "run_trade_revaluation(%s): broker position state unknown — skipping cycle",
+                symbol,
+            )
+            return
         if not open_positions:
             return
 
@@ -623,6 +640,10 @@ class ExecutionService:
         Structural analysis is NOT done here (that's run_trade_revaluation).
         """
         open_positions = self._tr.get_open_positions()
+        if open_positions is None:
+            # Broker state unknown — skip this monitoring pass entirely.
+            # The gateway layer already logged the warning; ticks retry.
+            return
         if not open_positions:
             return
 
@@ -1008,8 +1029,19 @@ class ExecutionService:
         Reconcile tracking state for positions MT5 has already closed
         (server-side SL/TP, or manual). Uses BROKER-TRUTH realised P&L — never
         an MFE/intended-level reconstruction.
+
+        NEVER prune on uncertainty: get_open_positions() returning None means
+        the broker couldn't be asked (transient MT5 drop), NOT that the book
+        is flat. Before this guard, a brief MT5 hiccup made every tracked
+        trade look closed and _finalize_close journalled a phantom
+        broker_close for each — corrupting the journal, the EV window and the
+        loss-streak state while the positions were in fact still open
+        (QA audit finding R1.3).
         """
-        open_tickets = {int(p.mt5_ticket or p.id) for p in self._tr.get_open_positions()}
+        positions = self._tr.get_open_positions()
+        if positions is None:
+            return  # broker state unknown — retry next tick; gateway logged it
+        open_tickets = {int(p.mt5_ticket or p.id) for p in positions}
         stale = [t for t in list(self._trade_states.keys()) if t not in open_tickets]
         for t in stale:
             state = self._trade_states.get(t)

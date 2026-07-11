@@ -205,8 +205,12 @@ class MarginManager:
         Falls back to balance if open position profit data is unavailable.
         """
         try:
-            positions   = self._tr.get_open_positions()
-            unrealized  = sum(
+            positions = self._tr.get_open_positions()
+            if positions is None:
+                # Broker state unknown — explicit balance fallback (previously
+                # this path only worked by accident via the blanket except).
+                return balance
+            unrealized = sum(
                 float(p.profit)
                 for p in positions
                 if hasattr(p, "profit") and p.profit is not None

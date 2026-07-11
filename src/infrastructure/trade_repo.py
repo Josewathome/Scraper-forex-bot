@@ -180,8 +180,12 @@ class MT5TradeRepository(ITradeRepository):
                     ticket, pos["sl"], new_sl)
         return True
 
-    def get_open_positions(self) -> List[Trade]:
+    def get_open_positions(self) -> Optional[List[Trade]]:
         raw = self._gw.get_open_positions()
+        if raw is None:
+            # Broker state unknown (MT5 unreachable/error) — propagate, never
+            # masquerade as "flat". See MT5Gateway.get_open_positions docstring.
+            return None
         trades = []
         for p in raw:
             direction = Direction.BULLISH if p["type"] == "BUY" else Direction.BEARISH

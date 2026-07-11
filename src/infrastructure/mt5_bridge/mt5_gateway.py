@@ -635,12 +635,32 @@ class MT5Gateway:
 
     # ── Positions ─────────────────────────────────────────────────
 
-    def get_open_positions(self) -> List[Dict[str, Any]]:
+    def get_open_positions(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Open positions per the broker. THREE distinct outcomes:
+
+          list  — confirmed broker state ([] really means flat)
+          None  — could NOT ask the broker (MT5 not ready, or
+                  positions_get() errored). Callers MUST NOT treat None
+                  as "no positions": conflating them made
+                  _prune_closed_positions finalize every tracked trade
+                  as broker_close during any transient MT5 hiccup —
+                  phantom journal entries and lost trade management
+                  (QA audit finding R1.3).
+        """
         if not self._ensure_ready():
-            return []
+            logger.warning(
+                "get_open_positions: MT5 not ready — position state UNKNOWN (returning None)"
+            )
+            return None
         positions = mt5.positions_get()
         if positions is None:
-            return []
+            # Per MT5 API: empty tuple = confirmed flat; None = error.
+            logger.warning(
+                "get_open_positions: positions_get() error %s — position state UNKNOWN (returning None)",
+                mt5.last_error(),
+            )
+            return None
         return [
             {
                 "ticket":     int(p.ticket),
