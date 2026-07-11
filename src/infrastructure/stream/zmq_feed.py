@@ -69,6 +69,10 @@ class ZmqFeed:
         self._q        = event_queue
         self._stop     = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Malformed-tick guard state (see _handle_tick): count + last-warn
+        # monotonic so a storm of bad ticks logs once a minute, not per tick.
+        self._bad_ticks_dropped  = 0
+        self._bad_tick_last_warn = 0.0
 
         for sym in list(builders.keys()):
             def _make_cb(s: str) -> Callable:
@@ -180,6 +184,23 @@ class ZmqFeed:
         bid = data.get("bid", 0.0)
         ask = data.get("ask", 0.0)
         t   = data.get("time", 0)
+        if bid <= 0 or ask <= 0:
+            # A TICK missing bid/ask defaults to 0.0 above — without this
+            # guard that zero flowed into CandleBuilder.on_tick (which has no
+            # positivity check) and corrupted the forming candle's OHLC, then
+            # rode the queue into strategy evaluation. No legitimate FX quote
+            # is non-positive, so drop the tick entirely. Keep the guard to
+            # `<= 0` only — no wider heuristics (spread checks etc.) here.
+            self._bad_ticks_dropped += 1
+            now_mono = time.monotonic()
+            if now_mono - self._bad_tick_last_warn >= 60.0:
+                self._bad_tick_last_warn = now_mono
+                logger.warning(
+                    "TcpFeed: dropped malformed tick(s) — %d so far "
+                    "(latest: sym=%r bid=%r ask=%r)",
+                    self._bad_ticks_dropped, sym, bid, ask,
+                )
+            return
         builder = self._builders.get(sym)
         if builder:
             builder.on_tick(bid=bid, ask=ask, tick_time=t)
