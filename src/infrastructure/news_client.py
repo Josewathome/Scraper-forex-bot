@@ -175,7 +175,12 @@ class ForexNewsClient(INewsRepository):
 
         logger.info("Fetching ForexFactory events for %s — %s", date_str, currencies)
         try:
-            resp = self._session.get(BASE_FF, params=params)
+            # timeout is mandatory here: this runs on the MAIN event loop
+            # (news refresh every NEWS_REFRESH_INTERVAL_MINUTES), and requests
+            # blocks forever without one — a hung news host would freeze tick
+            # processing and SL/TP management. Timeout → RequestException →
+            # [] → NewsManager's stale-data fail-closed path takes over.
+            resp = self._session.get(BASE_FF, params=params, timeout=(3.05, 10))
             self._log_response_debug(resp)
             resp.raise_for_status()
             data = resp.json()
@@ -251,7 +256,8 @@ class ForexNewsClient(INewsRepository):
             start_date, end_date, currencies,
         )
         try:
-            resp = self._session.get(BASE_MFX, params=params)
+            # Same main-loop freeze rationale as the ForexFactory call above.
+            resp = self._session.get(BASE_MFX, params=params, timeout=(3.05, 10))
             self._log_response_debug(resp)
             resp.raise_for_status()
             data = resp.json()
