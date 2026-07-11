@@ -38,6 +38,7 @@ from typing import Dict, Optional
 
 import src.config as config
 
+from src.infrastructure                              import mt5_time
 from src.infrastructure.mt5_bridge.mt5_gateway      import MT5Gateway
 from src.infrastructure.market_data_repo             import MT5MarketDataRepository, BrokerClock
 from src.infrastructure.trade_repo                   import MT5TradeRepository
@@ -199,11 +200,11 @@ def run_stream() -> None:
     # applies to every MT5 timestamp from here on. The host clock is never
     # consulted again after this one measurement.
     _detected_offset = gw.detect_utc_offset()
-    if _detected_offset != 0:
-        config.BROKER_UTC_OFFSET_HOURS = _detected_offset
+    _offset, _offset_source = mt5_time.resolve_startup_offset(_detected_offset)
+    config.BROKER_UTC_OFFSET_HOURS = _offset
     logger.info(
-        "MT5-to-real-world-hour offset: UTC%+d (detected=%+d, applied once at startup)",
-        config.BROKER_UTC_OFFSET_HOURS, _detected_offset,
+        "MT5-to-real-world-hour offset: UTC%+d (%s; detected=%+d, applied once at startup)",
+        config.BROKER_UTC_OFFSET_HOURS, _offset_source, _detected_offset,
     )
 
     clock   = BrokerClock(gw)   # MT5 server time, offset-corrected — no NTP, no host clock
