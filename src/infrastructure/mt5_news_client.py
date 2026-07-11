@@ -45,6 +45,12 @@ class MT5NewsClient(INewsRepository):
     def __init__(self) -> None:
         # event_id -> (currency, name, importance_int)
         self._event_defs: Dict[int, Tuple[str, str, int]] = {}
+        # The "no event definitions" condition is chronic on brokers that
+        # don't expose calendar data (this deployment logged it 2,379 times
+        # in 32 days at WARNING with zero successful fetches ever). Surface
+        # it ONCE per process at WARNING, then drop to DEBUG — ForexFactory
+        # carries the real news feed; this client is best-effort enrichment.
+        self._warned_no_defs = False
 
     # ── INewsRepository ───────────────────────────────────────────
 
@@ -99,9 +105,12 @@ class MT5NewsClient(INewsRepository):
     ) -> List[NewsEvent]:
         self._load_defs(currencies)
         if not self._event_defs:
-            logger.warning(
+            log_fn = logger.debug if self._warned_no_defs else logger.warning
+            self._warned_no_defs = True
+            log_fn(
                 "MT5 calendar: no event definitions found for currencies %s. "
-                "Ensure MT5 is connected and calendar data is available for your broker.",
+                "Ensure MT5 is connected and calendar data is available for "
+                "your broker. (Further occurrences log at DEBUG.)",
                 currencies,
             )
             return []
