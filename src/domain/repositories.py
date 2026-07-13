@@ -80,6 +80,13 @@ class ITradeRepository(ABC):
     def get_account_balance(self) -> float: ...
 
     @abstractmethod
+    def get_account_equity(self) -> Optional[float]:
+        """Broker-computed equity (balance + floating P&L incl. swap).
+        None = unreadable (connection/API error) — callers fall back to
+        balance, never to 0."""
+        ...
+
+    @abstractmethod
     def get_free_margin(self) -> float: ...
 
     def partial_close_trade(self, ticket: int, volume: float, comment: str = "") -> bool:

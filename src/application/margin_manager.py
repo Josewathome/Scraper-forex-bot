@@ -16,6 +16,7 @@ data on every call so it always reflects current portfolio state.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, Optional, Tuple
 
 import src.config as config
@@ -33,6 +34,8 @@ class MarginManager:
     def __init__(self, trade_repo, execution_service=None) -> None:
         self._tr   = trade_repo
         self._exec = execution_service  # optional — used to read _trade_states
+        # Throttle for the equity→balance degradation warning (≤ 1/min).
+        self._equity_fallback_last_warn = 0.0
 
     # ── Quality grading and risk allocation ───────────────────────────────────
 
@@ -201,26 +204,38 @@ class MarginManager:
 
     def _compute_equity(self, balance: float) -> float:
         """
-        Equity = realized balance + sum of unrealized P&L on open positions.
-        Falls back to balance if open position profit data is unavailable.
+        Equity per the BROKER: MT5's account_info().equity — realized balance
+        plus floating P&L including swap/commission effects, computed by the
+        platform itself. Falls back to realized balance when the broker is
+        unreachable (fallback logged, throttled ≤ 1/min; new entries are
+        already blocked in that state by the position-state guards).
+
+        HISTORY (QA finding, Phase 2A): this used to compute
+        balance + Σ p.profit over get_open_positions(), but the Trade entity
+        never carried a `profit` field, so the hasattr() guard silently zeroed
+        the sum and "equity" was ALWAYS just balance — floating losses were
+        invisible to the daily-drawdown breaker and the equity-reserve floor.
         """
         try:
-            positions = self._tr.get_open_positions()
-            if positions is None:
-                # Broker state unknown — explicit balance fallback (previously
-                # this path only worked by accident via the blanket except).
-                return balance
-            unrealized = sum(
-                float(p.profit)
-                for p in positions
-                if hasattr(p, "profit") and p.profit is not None
-            )
-            return balance + unrealized
+            equity = self._tr.get_account_equity()
+            if equity is not None:
+                return float(equity)
+            now_mono = time.monotonic()
+            if now_mono - self._equity_fallback_last_warn >= 60.0:
+                self._equity_fallback_last_warn = now_mono
+                logger.warning(
+                    "_compute_equity: broker equity unreadable — falling back "
+                    "to realized balance %.2f (floating P&L invisible until reconnect)",
+                    balance,
+                )
+            return balance
         except Exception:
             return balance
 
     def get_equity(self, balance: float) -> float:
-        """Public equity accessor for drawdown check in entry_gate."""
+        """Broker-truth equity (see _compute_equity); `balance` is only the
+        degraded-mode fallback. Consumed by entry_gate's daily-drawdown
+        baseline + Gate 4 breaker, and by can_enter's equity-reserve floor."""
         return self._compute_equity(balance)
 
     # ── Internal helpers ──────────────────────────────────────────────────────

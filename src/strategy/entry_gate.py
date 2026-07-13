@@ -136,9 +136,11 @@ class EntryGate:
 
         self._daily_counts.clear()
         self._exploration_counts.clear()
-        # Use equity (balance + unrealized P&L) as the daily baseline so that
-        # open losing positions are counted in the drawdown check, not just
-        # realized balance which lags until trades close.
+        # Baseline on BROKER-reported equity (balance + floating P&L, from
+        # MT5 account_info().equity) so open positions count in the drawdown
+        # check — not just realized balance, which lags until trades close.
+        # (Before Phase 2A this silently WAS balance: the unrealized sum was
+        # a no-op because Trade has no profit field.)
         equity = self._margin.get_equity(balance)
         self._session_start_equity = equity
         logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
@@ -245,7 +247,8 @@ class EntryGate:
         signal._eval_id = eval_id
 
         # ── Gate 4: Daily drawdown circuit breaker ─────────────────
-        # Use equity (balance + unrealized P&L) so open losing positions
+        # Uses BROKER-reported equity (MT5 account_info().equity — balance +
+        # floating P&L) so open losing positions
         # are included in the drawdown calculation, not just realized balance.
         drawdown_limit = getattr(config, "DAILY_DRAWDOWN_LIMIT_PCT", 6.0)
         current_equity = self._margin.get_equity(balance)
