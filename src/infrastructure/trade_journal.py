@@ -4,18 +4,51 @@ trade_journal.py — Persistent trade record.
 Every opened/closed trade is appended here so the dashboard can
 show live analytics without querying MT5 history.
 
-Storage: .cache/trade_journal.json
+Storage: .checkpoints/trade_journal.json
+
+WHY .checkpoints (Phase 2B / R2.2): the journal used to live in .cache,
+which CleanupService wipes every Friday at market close and purges daily
+at CACHE_RETENTION_DAYS. The EV gate's broker-truth rolling window
+(EV_MIN_SAMPLES=30 / EV_ROLLING_WINDOW=50) reads from this journal, so it
+was reset to bootstrap ASSUMED_WIN_RATE every single week and could rarely
+reach statistical significance before erasure. .checkpoints is a host-bind
+volume that is never wiped. A one-time migration moves any legacy .cache
+journal on first construction.
 """
 from __future__ import annotations
 import json
 import logging
+import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PATH = Path(".cache") / "trade_journal.json"
+_DEFAULT_PATH = Path(".checkpoints") / "trade_journal.json"
+_LEGACY_PATH  = Path(".cache") / "trade_journal.json"
+
+
+def _migrate_legacy_journal(new_path: Path) -> None:
+    """One-time move of the journal out of the weekly-wiped .cache.
+    Idempotent and best-effort: any failure leaves both files untouched and
+    must never block startup (the journal is analytics/EV data, not a
+    trading-critical dependency)."""
+    try:
+        if not _LEGACY_PATH.exists():
+            return
+        if new_path.exists():
+            logger.warning(
+                "TradeJournal: both legacy (%s) and new (%s) journals exist — "
+                "keeping the new one; legacy left in place (will be cache-wiped).",
+                _LEGACY_PATH, new_path,
+            )
+            return
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(_LEGACY_PATH), str(new_path))
+        logger.info("TradeJournal: migrated legacy journal %s → %s", _LEGACY_PATH, new_path)
+    except Exception as exc:
+        logger.warning("TradeJournal: legacy journal migration failed: %s", exc)
 
 # Journal record schema version. v2 = `pnl` is BROKER-TRUTH money in the account
 # currency. Records written by the original bot (no `schema`, or schema < 2)
@@ -39,6 +72,10 @@ class TradeJournal:
 
     def __init__(self, path: str | Path | None = None) -> None:
         self.path: Path = Path(path) if path else _DEFAULT_PATH
+        if path is None:
+            # Only the default-path journal migrates — explicit paths are
+            # used by tests/tools and must stay exactly where they point.
+            _migrate_legacy_journal(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._trades: List[Dict[str, Any]] = self._load()
 

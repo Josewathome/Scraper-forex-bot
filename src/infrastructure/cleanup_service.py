@@ -24,6 +24,14 @@ _CHECKPOINT_PROTECTED = {
     "jwt_secret.txt",
     "jwt_blocklist.json",
     "symbols_override.json",
+    # trade_journal.json: feeds the EV gate's rolling window — relocated here
+    # (Phase 2B/R2.2) precisely to escape wipes; a quiet no-trade week must
+    # not age it past the purge cutoff.
+    "trade_journal.json",
+    # broker_utc_offset.json: last live-detected DST offset (R1.6) — only
+    # rewritten at startup, so >7 days of uptime must not get it purged
+    # (losing it re-exposes the weekend-restart wrong-offset bug).
+    "broker_utc_offset.json",
 }
 
 
