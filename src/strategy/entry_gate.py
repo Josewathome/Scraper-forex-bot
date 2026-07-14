@@ -145,6 +145,66 @@ class EntryGate:
         self._session_start_equity = equity
         logger.info("EntryGate: new day — equity baseline %.2f (balance=%.2f)", equity, balance)
 
+    # ── Checkpoint persistence (Phase 2B / R2.1+R2.3) ──────────────
+    #
+    # Why: every field below was memory-only, and startup unconditionally
+    # re-ran on_new_day() — so ANY restart re-baselined the 4% daily-
+    # drawdown breaker to current equity (forgiving the day's losses),
+    # refreshed the per-day exploration budget, and reset anti-duplicate
+    # tracking. The bot restarts often (deploys, MT5 heals), so the one
+    # hard capital-loss circuit breaker was effectively defeated.
+
+    def get_state(self) -> dict:
+        """JSON-safe snapshot for the checkpoint. Restored by restore_state()."""
+        return {
+            "session_start_equity": self._session_start_equity,
+            "last_new_day_utc":     self._last_new_day_utc,
+            "daily_counts":         dict(self._daily_counts),
+            "exploration_counts":   dict(self._exploration_counts),
+            "last_fill": {
+                sym: {d: dt.isoformat() for d, dt in dirs.items()}
+                for sym, dirs in self._last_fill.items()
+            },
+        }
+
+    def restore_state(self, state: Optional[dict]) -> None:
+        """
+        Restore a get_state() snapshot. Tolerant by design: missing keys,
+        legacy checkpoints (no snapshot at all), or malformed entries fall
+        back to fresh-start behavior — a bad checkpoint must never block
+        startup. Call BEFORE on_new_day(): its same-day guard then keeps
+        the restored baseline instead of re-baselining on every restart.
+        """
+        if not state or not isinstance(state, dict):
+            return
+        try:
+            equity = state.get("session_start_equity")
+            if isinstance(equity, (int, float)) and equity > 0:
+                self._session_start_equity = float(equity)
+            day = state.get("last_new_day_utc")
+            if isinstance(day, str) and day:
+                self._last_new_day_utc = day
+            if isinstance(state.get("daily_counts"), dict):
+                self._daily_counts = {str(k): int(v) for k, v in state["daily_counts"].items()}
+            if isinstance(state.get("exploration_counts"), dict):
+                self._exploration_counts = {str(k): int(v) for k, v in state["exploration_counts"].items()}
+            if isinstance(state.get("last_fill"), dict):
+                for sym, dirs in state["last_fill"].items():
+                    if not isinstance(dirs, dict):
+                        continue
+                    for d, iso in dirs.items():
+                        try:
+                            self._last_fill.setdefault(str(sym), {})[str(d)] = datetime.fromisoformat(iso)
+                        except (TypeError, ValueError):
+                            continue  # one bad entry must not spoil the rest
+            logger.info(
+                "EntryGate state restored (baseline=%s, day=%s, daily_counts=%s)",
+                f"{self._session_start_equity:.2f}" if self._session_start_equity else None,
+                self._last_new_day_utc, dict(self._daily_counts),
+            )
+        except Exception as exc:
+            logger.warning("EntryGate state restore failed (fresh start): %s", exc)
+
     def record_trade(self, now: datetime) -> None:
         """Increment informational daily counter and record fill time."""
         today = now.date().isoformat()

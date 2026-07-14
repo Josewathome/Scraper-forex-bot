@@ -305,7 +305,6 @@ def run_stream() -> None:
     # ── Entry gate ─────────────────────────────────────────────────────
     entry_gate = EntryGate(news_manager=news_manager, execution=execution)
     _startup_balance = (gw.get_account_info() or {}).get("balance", 0.0)
-    entry_gate.on_new_day(_startup_balance, now=clock.now())
 
     cleanup    = CleanupService()
     checkpoint = CheckpointService(getattr(config, "CHECKPOINT_DIR", ".checkpoints"))
@@ -313,6 +312,11 @@ def run_stream() -> None:
     scheduler  = Scheduler(clock=clock)
 
     # ── Restore checkpoint ─────────────────────────────────────────────
+    # ORDER MATTERS: restore the gate's persisted state BEFORE calling
+    # on_new_day() below — its same-day guard then keeps the restored
+    # drawdown baseline on an intraday restart instead of re-baselining
+    # to current equity (which silently forgave the day's losses on every
+    # restart — QA finding R2.1).
     cp = checkpoint.load()
     if cp:
         logger.info("Resumed from checkpoint (saved_at=%s).", cp.get("saved_at"))
@@ -322,6 +326,13 @@ def run_stream() -> None:
                 execution.load_runtime_state(rt_state)
             except Exception as exc:
                 logger.warning("Runtime state restore failed: %s", exc)
+        try:
+            entry_gate.restore_state(cp.get("entry_gate_state"))
+        except Exception as exc:
+            logger.warning("EntryGate state restore failed: %s", exc)
+
+    # No-op if the restored state is from today; re-baselines on a new day.
+    entry_gate.on_new_day(_startup_balance, now=clock.now())
 
     # ── Dashboard ──────────────────────────────────────────────────────
     try:
@@ -414,7 +425,7 @@ def run_stream() -> None:
             clock.invalidate()
             _now = clock.now()
             if (_now - last_checkpoint).total_seconds() >= cp_interval:
-                _do_checkpoint(execution, checkpoint, _now, loop_n)
+                _do_checkpoint(execution, checkpoint, _now, loop_n, entry_gate)
                 last_checkpoint = _now
             continue
 
@@ -507,14 +518,14 @@ def run_stream() -> None:
 
         # ── Periodic checkpoint ─────────────────────────────────────────
         if (now - last_checkpoint).total_seconds() >= cp_interval:
-            _do_checkpoint(execution, checkpoint, now, loop_n)
+            _do_checkpoint(execution, checkpoint, now, loop_n, entry_gate)
             last_checkpoint = now
 
     # ── Shutdown ───────────────────────────────────────────────────────
     feed.stop()
     scheduler.stop()
     clock.invalidate()
-    _do_checkpoint(execution, checkpoint, clock.now(), loop_n)
+    _do_checkpoint(execution, checkpoint, clock.now(), loop_n, entry_gate)
     gw.disconnect()
     logger.info("Bot stopped cleanly (stream mode).")
 
@@ -705,18 +716,25 @@ def _do_checkpoint(
     checkpoint:  CheckpointService,
     now:         datetime,
     loop_n:      int,
+    entry_gate:  Optional[EntryGate] = None,
 ) -> None:
     try:
         rt_state = execution.save_runtime_state()
     except Exception as exc:
         logger.warning("Runtime state serialisation failed: %s", exc)
         rt_state = {}
+    try:
+        gate_state = entry_gate.get_state() if entry_gate is not None else None
+    except Exception as exc:
+        logger.warning("EntryGate state serialisation failed: %s", exc)
+        gate_state = None
     checkpoint.save({
         "loop_n":        loop_n,
         "symbols":       config.SYMBOLS,
         "risk_pct":      config.RISK_PERCENT,
         "min_rr":        config.MIN_RR,
         "runtime_state": rt_state,
+        "entry_gate_state": gate_state,
         "last_loop_ts":  now.isoformat(),
     }, now=now)
 
