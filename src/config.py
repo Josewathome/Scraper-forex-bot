@@ -38,12 +38,23 @@ JWT_ACCESS_EXPIRES_MINUTES  = int(os.environ.get("JWT_ACCESS_EXPIRES_MINUTES", "
 JWT_REFRESH_EXPIRES_DAYS    = int(os.environ.get("JWT_REFRESH_EXPIRES_DAYS", "7"))
 
 # ── Symbols to Trade ───────────────────────────────────────────────
-# Start live trading with a narrow, liquid universe to keep execution consistent.
-# XAUUSD is disabled because its wide stops and cost profile do not fit a small
-# account well; other symbols can be re-enabled after a week of stable behavior.
-_ALL_SYMBOLS = ["GBPUSD", "USDJPY"]
+# 2026-06-26 (a8eb710) narrowed this to GBPUSD+USDJPY only, for the first live
+# rollout, with an explicit "re-enable after a week of stable behavior" note
+# for AUDUSD/USDCHF -- no symbol-specific problem was ever documented for
+# either. That week elapsed (~3.5 weeks with no follow-up found in commit
+# history or the tracker) before Phase 3 evidence-collection work restored
+# them here (2026-07-18) to accelerate the current evaluation.
+#
+# XAUUSD is intentionally NOT in this list (not merely disabled below) --
+# per the 2026-06-16 (c62d7584) day-15 incident: gold's ~$4-5 structural stop
+# is ~3% of this account and its losses tripped the shared daily-drawdown
+# breaker, blocking FX too. Documented re-enable condition is capital >=
+# ~$1,000; the account is still ~$130. This condition is unrelated to the
+# Phase 3 tick-score fix and remains unmet -- do not add XAUUSD back here
+# without re-verifying that condition first.
+_ALL_SYMBOLS = ["GBPUSD", "USDJPY", "AUDUSD", "USDCHF"]
 DISABLED_SYMBOLS: set = {
-    s.strip().upper() for s in os.environ.get("DISABLED_SYMBOLS", "XAUUSD,AUDUSD,USDCHF").split(",") if s.strip()
+    s.strip().upper() for s in os.environ.get("DISABLED_SYMBOLS", "XAUUSD").split(",") if s.strip()
 }
 SYMBOLS = [s for s in _ALL_SYMBOLS if s not in DISABLED_SYMBOLS]
 
