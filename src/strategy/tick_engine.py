@@ -236,8 +236,15 @@ class TickFeatureCalculator:
 
         score = 0.0
 
-        # Velocity: cap at 10 ticks/sec as "maximum" (typical: 2-6 during active sessions)
-        vel = min(cls.tick_velocity(ticks) / 10.0, 1.0)
+        # Velocity: cap at 4 ticks/sec as "maximum" (corrected 2026-07-18 —
+        # QA finding: the prior /10.0 divisor was calibrated for a
+        # higher-tick-rate feed than this one actually delivers. Measured
+        # distribution on this live feed: mean=1.68, p50=1.6, p95=3.4,
+        # p99=4.4, max=10.6 (one outlier) — /10.0 meant the top ~1% of real
+        # activity only reached ~0.44 of the velocity budget, depressing
+        # every symbol equally. /4.0 puts full credit at the observed p95-p99
+        # band instead of a ceiling the feed almost never reaches.)
+        vel = min(cls.tick_velocity(ticks) / 4.0, 1.0)
         score += vel * 0.25
 
         # Acceleration: clamp to [0, 1]
@@ -255,9 +262,19 @@ class TickFeatureCalculator:
         # Price displacement in our direction
         disp = cls.price_displacement(ticks)
         if (direction == 1 and disp > 0) or (direction == -1 and disp < 0):
-            # Normalise: 2 pips of displacement = full score (reduced from 5 pips —
-            # typical M1 window sees 0.3-1.5 pip moves; 5 pips was never reached)
-            disp_norm = min(abs(disp) / 0.0002, 1.0)
+            # Normalise: 2 pips of displacement = full score. `disp` is RAW
+            # PRICE (price_displacement() returns price units, not pips), so
+            # the pip threshold must scale with the instrument's own pip
+            # size — corrected 2026-07-18 (QA finding). The prior fixed
+            # 0.0002 divisor equals 2 pips ONLY for a 5-digit pair
+            # (0.0001/pip); for USDJPY (0.01/pip) it was 0.02 pips — free
+            # displacement credit for JPY on any trivial tick, while 5-digit
+            # majors (GBPUSD/AUDUSD/USDCHF) had to clear a real 2-pip move.
+            # Same price-magnitude pip-size heuristic already used in this
+            # codebase (scalper_alignment.py) — no new dependency, no
+            # symbol-string parsing.
+            _pip_size = 0.01 if ticks[-1].price > 10 else 0.0001
+            disp_norm = min(abs(disp) / (2.0 * _pip_size), 1.0)
         else:
             disp_norm = 0.0
         score += disp_norm * 0.25
