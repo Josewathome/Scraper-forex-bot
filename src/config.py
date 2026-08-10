@@ -481,6 +481,27 @@ RETEST_SHADOW_MODE:        bool  = os.environ.get("RETEST_SHADOW_MODE", "true").
 # evaluate signals and place trades once all other safety gates pass.
 STRATEGY_GATE_ENABLED: bool = os.environ.get("STRATEGY_GATE_ENABLED", "true").lower() == "true"
 
+# ── Full trade halt (harder stop than STRATEGY_GATE_ENABLED) ──────
+# STRATEGY_GATE_ENABLED=false still runs the FULL pipeline (candle
+# recording, zone/structure labeling, signal generation) and only skips
+# the final order-placement step -- signals are still generated and
+# logged. TRADING_HALTED is a stricter, earlier circuit breaker: when
+# true, ticks are still received off the event queue (so the queue never
+# backs up) but are NOT recorded into candles, NOT used to label zones/
+# structure, and NEVER reach signal generation at all -- see the halt
+# check in main_stream.py's TICK and CANDLE_CLOSED handlers, gating
+# strategy.push_tick / strategy.on_candle / _run_strategy_evaluation.
+# NOTE ON OPEN POSITIONS: only tick-level monitoring
+# (execution.run_monitoring_only -- TP1/TP2 partials, time-based exit)
+# stays active while halted. Candle-level run_trade_revaluation
+# (structural SL trailing, thesis-continuation scoring, reversal-exit
+# check) lives inside the same M1-close path this flag skips, so it does
+# NOT run while halted -- an open position keeps its TP/time-exit but
+# loses structural SL trailing/reversal-exit for the duration of the halt.
+# SAFE DEFAULT: false = normal operation. Set TRADING_HALTED=true in .env
+# to engage the halt without editing code.
+TRADING_HALTED: bool = os.environ.get("TRADING_HALTED", "false").lower() == "true"
+
 # ── Tick Analytics ────────────────────────────────────────────────
 # Set any of these to "false" in .env to disable that subsystem.
 # All default to true so the feature is on out of the box.

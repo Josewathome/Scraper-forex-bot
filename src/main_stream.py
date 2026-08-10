@@ -401,6 +401,10 @@ def run_stream() -> None:
     feed.start()
 
     running = [True]
+    _halt_state = [None]  # tracks the last-logged TRADING_HALTED value so the
+                           # transition (and only the transition) gets logged,
+                           # not every tick -- see the TICK/CANDLE_CLOSED
+                           # handlers below.
 
     def _shutdown(sig, frame):
         logger.info("Shutdown signal received.")
@@ -440,6 +444,21 @@ def run_stream() -> None:
         clock.invalidate()
         now = clock.now()
 
+        # ── Full trade halt transition log (state-change only, not per-tick) ──
+        if config.TRADING_HALTED != _halt_state[0]:
+            if config.TRADING_HALTED:
+                logger.warning(
+                    "TRADING_HALTED engaged — ticks/candles will be received and "
+                    "discarded (not recorded, not zone/structure-labeled), no "
+                    "signals will be generated, no new trades will be opened. "
+                    "Open positions keep tick-level TP1/TP2/time-based-exit "
+                    "monitoring, but candle-level structural SL trailing and "
+                    "reversal-exit checks are OFF for the duration of the halt."
+                )
+            else:
+                logger.warning("TRADING_HALTED lifted — normal signal analysis resumed.")
+            _halt_state[0] = config.TRADING_HALTED
+
         # ── Refresh news periodically ──────────────────────────────────
         if (now - last_news_refresh).total_seconds() >= 60:
             try:
@@ -452,19 +471,33 @@ def run_stream() -> None:
         if etype == "TICK":
             sym = event.get("sym", "")
             if sym in config.SYMBOLS:
+                # Tick-level position monitoring (TP1/TP2 partials, time-based
+                # exit) stays active under TRADING_HALTED -- deliberately NOT
+                # gated. This does not generate signals or record tick data
+                # into any analysis structure, only manages what's already
+                # open. NOTE: this is tick-level only -- candle-level
+                # structural SL trailing / reversal-exit (run_trade_revaluation,
+                # called from the M1-close path) is skipped while halted; see
+                # the CANDLE_CLOSED handler below and the TRADING_HALTED
+                # comment in config.py.
                 try:
                     execution.run_monitoring_only(sym, now)
                 except Exception as exc:
                     logger.exception("Monitoring [%s]: %s", sym, exc)
-                try:
-                    strategy.push_tick(
-                        sym,
-                        bid=event.get("bid", 0.0),
-                        ask=event.get("ask", 0.0),
-                        ts=float(event.get("time", 0)),
-                    )
-                except Exception as exc:
-                    logger.debug("Strategy tick push [%s]: %s", sym, exc)
+                # Tick-level analysis (zone/level tracking within the
+                # forming bar) -- this is the gate: under TRADING_HALTED the
+                # tick is received (so the queue never backs up) but simply
+                # discarded here, never reaching the strategy engine at all.
+                if not config.TRADING_HALTED:
+                    try:
+                        strategy.push_tick(
+                            sym,
+                            bid=event.get("bid", 0.0),
+                            ask=event.get("ask", 0.0),
+                            ts=float(event.get("time", 0)),
+                        )
+                    except Exception as exc:
+                        logger.debug("Strategy tick push [%s]: %s", sym, exc)
 
         # ── CANDLE_CLOSED ──────────────────────────────────────────────
         # Sole source for candle-close events: CandleBuilder's _on_close
@@ -474,6 +507,19 @@ def run_stream() -> None:
         elif etype == "CANDLE_CLOSED":
             candle = event.get("candle")
             if candle is None:
+                continue
+            # Full halt: the candle-closed event is received (drained off
+            # the queue, so CandleBuilder/ZmqFeed never back up) but goes
+            # no further -- no structure/zone labeling (strategy.on_candle),
+            # no signal generation, no entry-gate evaluation. An early
+            # continue rather than gating each call individually guarantees
+            # nothing downstream of "a candle closed" can run while halted.
+            # This ALSO skips run_trade_revaluation (structural SL trailing /
+            # reversal-exit for already-open positions), since that call lives
+            # inside _run_strategy_evaluation on this same M1-close path --
+            # open positions keep only the tick-level monitoring above while
+            # halted, not this. See the TRADING_HALTED comment in config.py.
+            if config.TRADING_HALTED:
                 continue
             sym = candle.symbol
             tf  = candle.timeframe
@@ -741,6 +787,21 @@ def _do_checkpoint(
 
 if __name__ == "__main__":
     _setup_logging()
+
+    # Full trade halt: don't connect to MT5, don't attach to the tick feed,
+    # don't do ANY of the run_stream() setup -- exit immediately. This is a
+    # static operator switch (.env, requires a restart to change), so there
+    # is nothing to poll for here; the container-level launcher checks the
+    # same TRADING_HALTED env var before ever spawning this process (see
+    # override_start.sh) so this process exiting does not trigger a restart
+    # loop -- it's a belt-and-suspenders guard for direct invocation.
+    if config.TRADING_HALTED:
+        logger.warning(
+            "TRADING_HALTED=true — not connecting to MT5, not attaching to "
+            "the tick feed. Exiting immediately; no reconnect/restart will "
+            "be attempted. Set TRADING_HALTED=false and restart to resume."
+        )
+        sys.exit(0)
 
     # Refuse to start trading if config violates edge-first minimums.
     # Only enforced when STRATEGY_GATE_ENABLED=true (observe mode still starts).

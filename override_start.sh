@@ -1085,6 +1085,26 @@ _graceful_shutdown() {
 }
 trap _graceful_shutdown SIGTERM SIGINT
 
+# ── Full trade halt: don't start the bot at all ────────────────────
+# TRADING_HALTED is a static operator switch (.env, requires a container
+# restart to change) -- main_stream.py itself refuses to start when it's
+# true, but if we still launched it here it would exit almost instantly,
+# `wait "${_bot_pid}"` would return, this script would reach EOF, the
+# container's PID 1 would exit, and docker-compose's `restart:
+# unless-stopped` would relaunch the WHOLE container (MT5 + this script)
+# just to hit the same halt and exit again -- a fast restart loop. Skip
+# spawning the bot entirely and idle instead: MT5/VNC stay up for
+# inspection, nothing retries, and SIGTERM still triggers the graceful
+# MT5 shutdown above via the backgrounded `sleep` + `wait` pattern below
+# (identical to how the real bot is waited on).
+if [ "$(echo "${TRADING_HALTED:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+    show_message "TRADING_HALTED=true — not starting the bot. MT5 stays up for inspection; no restart will be attempted."
+    sleep infinity &
+    _bot_pid=$!
+    wait "${_bot_pid}"
+    exit 0
+fi
+
 # ── START BOT ─────────────────────────────────────────────────────
 # Launch the event-driven streaming bot (main_stream.py).
 # Wine reports os.name == "nt" so mt5_gateway.py uses direct
