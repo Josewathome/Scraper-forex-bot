@@ -126,7 +126,40 @@ int OnInit()
    _TryConnect();
    EventSetTimer(1);
    Print("ZoneBotBridge v3: target=", g_host, ":", g_port);
+
+   _TryAttachPortfolioEA();
+
    return INIT_SUCCEEDED;
+}
+
+// ── Auto-attach Portfolio_EA to a second chart (XAUUSD) ────────────
+// MT5's own /config:<ini> [StartUp] mechanism only auto-attaches ONE
+// expert per launch (this bridge, on GBPUSD) -- confirmed a second
+// `terminal64.exe /config:...` invocation against the already-running
+// instance does nothing (no new chart appears). This OnInit() is the
+// one hook guaranteed to run on every terminal launch, so it's the only
+// reliable place to auto-open a second chart without relying on this
+// Wine build's broken session/profile persistence.
+//
+// Purely additive to the bridge's own job: both calls return a failure
+// value instead of throwing, so if Portfolio_EA.ex5 or its template are
+// ever missing/renamed, this just logs and OnInit() still returns
+// INIT_SUCCEEDED -- the bridge's own feed connection above is never
+// affected either way.
+void _TryAttachPortfolioEA()
+{
+   long chart_id = ChartOpen("XAUUSD", PERIOD_H1);
+   if(chart_id == 0)
+   {
+      Print("ZoneBotBridge: Portfolio_EA auto-attach skipped — could not open XAUUSD,H1 chart, err=", GetLastError());
+      return;
+   }
+   if(!ChartApplyTemplate(chart_id, "Portfolio_EA.tpl"))
+   {
+      Print("ZoneBotBridge: Portfolio_EA auto-attach skipped — Portfolio_EA.tpl template not found or failed to apply, err=", GetLastError());
+      return;
+   }
+   Print("ZoneBotBridge: Portfolio_EA template applied to XAUUSD,H1 chart id=", chart_id);
 }
 
 void OnDeinit(const int reason)
