@@ -479,6 +479,43 @@ _write_startup_ini() {
     # inputs. CRLF line endings as MT5 expects.
     # IMPORTANT: MT5 ini files use integer booleans (1/0), NOT string "true"/"false".
     # Using "true" causes MT5 to treat the value as 0 (disabled) — AutoTrading stays red.
+    #
+    # Script=AttachDeployedEAs (2026-08-12, demo forward-monitor, remove after
+    # the monitor period if either EA is retired): [StartUp] only supports one
+    # Expert=/Symbol=/Period= tuple, but it ALSO runs a Script= entry after the
+    # Expert attaches. AttachDeployedEAs.mq5 opens both the US30 H1 chart
+    # (applying US30_ShortBBFade.tpl, 2026-08-11 deployment) and the AUDUSD H1
+    # chart (applying NZDUSD_AUD_Divergence.tpl, 2026-08-12 deployment - a
+    # cross-pair momentum "catch-up" signal: NZDUSD leads, AUDUSD follows,
+    # validated on 2026 data only per broker history-quality constraint),
+    # giving two more live-attached EAs through the same proven [StartUp]
+    # mechanism ZoneBotBridge already uses reliably. AttachUS30.mq5 and
+    # US30_ShortBBFade_EA.mq5 themselves are untouched by this change.
+    #
+    # ZoneBotBridge attach is gated on TRADING_HALTED (2026-08-12): when halted,
+    # main_stream.py never starts (see the TRADING_HALTED block near the end of
+    # this script), so nothing listens on the feed port and the EA was spinning
+    # in an infinite "connected / send failed / reconnecting" loop every ~5s
+    # forever, with the watchdog also disabled during a halt so nothing stopped
+    # it. Simplest fix: don't attach it at all while halted. US30/NZDUSD-AUD
+    # trade natively (no TCP feed dependency) so they're unaffected either way.
+    # TRADING_HALTED gating (2026-08-13, fixed version): when halted,
+    # main_stream.py never starts, so nothing listens on ZoneBotBridge's feed
+    # port and it was spinning in an infinite "connected / send failed /
+    # reconnecting" loop every ~5s forever (watchdog also disabled during a
+    # halt, so nothing stopped it). First attempt omitted Expert= entirely to
+    # stop this, but that broke Script=AttachDeployedEAs too - confirmed by
+    # direct observation that Script= does NOT fire without an Expert= entry
+    # present (US30/NZDUSD-AUD both silently stopped attaching). Fix: keep an
+    # Expert= entry always present, just point it at HaltedPlaceholder.mq5 (a
+    # trivial no-op EA, does no trading/reconnecting) instead of ZoneBotBridge
+    # while halted. ZoneBotBridge.mq5 itself is never modified either way.
+    local _halted_for_startup
+    _halted_for_startup="$(echo "${TRADING_HALTED:-false}" | tr '[:upper:]' '[:lower:]')"
+    local _startup_expert="ZoneBotBridge"
+    if [ "${_halted_for_startup}" = "true" ]; then
+        _startup_expert="HaltedPlaceholder"
+    fi
     {
         printf '[Experts]\r\n'
         printf 'AllowLiveTrading=1\r\n'
@@ -486,9 +523,10 @@ _write_startup_ini() {
         printf 'Account=0\r\n'
         printf 'Profile=0\r\n'
         printf '[StartUp]\r\n'
-        printf 'Expert=ZoneBotBridge\r\n'
+        printf 'Expert=%s\r\n' "${_startup_expert}"
         printf 'Symbol=GBPUSD\r\n'
         printf 'Period=H1\r\n'
+        printf 'Script=AttachDeployedEAs\r\n'
     } > "${STARTUP_INI_UNIX}"
 }
 
@@ -815,6 +853,16 @@ _relaunch_mt5() {
 
 _WATCHDOG_INTERVAL=20
 _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/ [StartUp]
+
+# The watchdog force-kills and relaunches terminal64.exe whenever it's not
+# running or the EA isn't feeding ticks — exactly the behavior that fights
+# any manual/ad-hoc use of this MT5 instance (compiling + Strategy Tester
+# runs, manual chart work, etc.) since it has no bot to reconnect while
+# TRADING_HALTED=true. Only arm it when the bot is actually supposed to be
+# live: MT5 stays up for inspection either way, but under a halt it now stays
+# fully hands-off — no auto-relaunch, no forced reconnects — so it can be
+# used for backtesting or manual work without the watchdog fighting back.
+if [ "$(echo "${TRADING_HALTED:-false}" | tr '[:upper:]' '[:lower:]')" != "true" ]; then
 (
     _no_feed=0
     while true; do
@@ -858,6 +906,9 @@ _HEAL_AFTER_SECS=120         # bot listening but no EA this long → relaunch w/
 ) &
 _watchdog_pid=$!
 show_message "MT5 auto-heal watchdog started (monitors EA connection on :${_FEED_PORT})."
+else
+    show_message "TRADING_HALTED=true — MT5 auto-heal watchdog NOT started (MT5 stays up, fully hands-off, no auto-relaunch)."
+fi
 
 # ── Wait until MT5 IPC is actually reachable before starting the bot ─
 # The bot's mt5.initialize() attaches to the RUNNING terminal (MT5_PATH is
