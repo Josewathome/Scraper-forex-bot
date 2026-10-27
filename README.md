@@ -221,7 +221,7 @@ docker compose logs -f scalper-prime
 docker exec scalper-prime grep "TICK\|ALIGN\|SIGNAL" /bot/logs/trading_bot.log | tail -20
 
 # Open the dashboard
-# Navigate to http://localhost:8080 in your browser
+# Navigate to http://localhost:8001 in your browser
 ```
 
 ### Stop the bot
@@ -236,17 +236,19 @@ docker compose down
 
 ### Day 1: Observation mode (STRATEGY_GATE_ENABLED=false)
 
-By default the bot runs in **observation mode** — it evaluates every M1 candle
-and logs signals but places no trades. This is intentional. Use this time to:
+With `.env.example` as shipped (`STRATEGY_GATE_ENABLED=false`) the bot runs in
+**observation mode** — it evaluates every M1 candle and logs signals but places
+no trades. Keep the line in your `.env`: if the variable is missing entirely,
+`src/config.py` defaults it to `true`. This is intentional. Use this time to:
 
 1. **Watch the logs** for `STRATEGY SIGNAL` lines. Each line shows the symbol,
    direction, confidence score, and why each gate passed or blocked.
 
-2. **Open the dashboard** at `http://localhost:8080`. Log in with your
+2. **Open the dashboard** at `http://localhost:8001`. Log in with your
    `DASHBOARD_PASSWORD` (or the auto-generated one printed in the logs).
    Go to the **Velocity Report** tab to see how many signals are being generated.
 
-3. **Check the MT5 UI** via VNC at `http://localhost:3000`. Verify the EA
+3. **Check the MT5 UI** via VNC at `http://localhost:3001`. Verify the EA
    (`ZoneBotBridge`) is attached to the chart and the "Algo Trading" button
    is green in MT5.
 
@@ -270,7 +272,7 @@ docker compose down && docker compose up -d
 
 ## 5. Dashboard
 
-Access the dashboard at `http://your-server-ip:8080`
+Access the dashboard at `http://your-server-ip:8001`
 
 | Tab | What it shows |
 |---|---|
@@ -359,7 +361,7 @@ Only relevant when `BROKER_ACCOUNT_TYPE=IC_MARKETS_RAW`.
 VNC_USER=admin
 VNC_PASSWORD=change_me_strong_password
 ```
-Credentials for the browser-based MT5 UI at `http://localhost:3000`.
+Credentials for the browser-based MT5 UI at `http://localhost:3001`.
 Use a strong password — this port is exposed on your host.
 You can watch MT5 executing trades in real time through this interface.
 
@@ -388,7 +390,7 @@ the news API on a different host or port.
 ```env
 DASHBOARD_PASSWORD=
 ```
-Password for the web dashboard at `http://localhost:8080`. If left blank, a
+Password for the web dashboard at `http://localhost:8001`. If left blank, a
 random 16-character password is generated and printed to the container log at
 startup. Set a permanent value so you don't need to check logs every time.
 
@@ -1278,7 +1280,7 @@ button forces an immediate report without waiting for the scheduled time.
 [ERROR] MT5 connection failed
 ```
 
-1. Open VNC at `http://localhost:3000`
+1. Open VNC at `http://localhost:3001`
 2. Check MT5 is open and logged in
 3. Verify `TRADING_ID`, `MT5_PASSWORD`, `MT5_SERVER` in `.env`
 4. Ensure "Algorithmic Trading" is enabled in MT5 (Tools → Options → Expert Advisors)
@@ -1334,7 +1336,7 @@ docker exec scalper-prime cat /bot/analytics/tick_velocity_report.txt
 # Via dashboard: Velocity Report tab → ⚡ Regenerate Now
 
 # Via API:
-curl -X POST http://localhost:8080/api/velocity-report/refresh \
+curl -X POST http://localhost:8001/api/velocity-report/refresh \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
